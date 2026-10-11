@@ -1,0 +1,62 @@
+{
+  "name": "interviewai",
+  "version": "2.0.0",
+  "private": true,
+  "scripts": {
+    "predev": "node scripts/copy-vad-assets.mjs",
+    "dev": "next dev",
+    "prebuild": "node scripts/copy-vad-assets.mjs",
+    "build": "next build",
+    "start": "next start",
+    "lint": "eslint .",
+    "typecheck": "tsc --noEmit",
+    "test": "vitest run",
+    "test:watch": "vitest",
+    "test:live": "LIVE_TESTS=1 vitest run",
+    "check": "npm run typecheck && npm run lint && npm run test",
+    "test:e2e": "node tests/e2e/index.mjs",
+    "test:live-browser": "node tests/live-browser/run.mjs",
+    "test:quality": "node tests/quality/eval.mjs"
+  },
+  "dependencies": {
+    "@codemirror/lang-cpp": "^6.0.3",
+    "@codemirror/lang-go": "^6.0.1",
+    "@codemirror/lang-java": "^6.0.2",
+    "@codemirror/lang-javascript": "^6.2.5",
+    "@codemirror/lang-python": "^6.2.1",
+    "@codemirror/lang-sql": "^6.10.0",
+    "@codemirror/state": "^6.7.6",
+    "@codemirror/view": "^6.43.14",
+    "@ricky0123/vad-react": "^0.0.36",
+    "@ricky0123/vad-web": "^0.0.30",
+    "@uiw/react-codemirror": "^4.25.12",
+    "@vercel/functions": "^3.9.11",
+    "clsx": "^2.1.1",
+    "framer-motion": "^12.42.2",
+    "lucide-react": "^1.23.0",
+    "mongodb": "^6.21.0",
+    "next": "16.4.0",
+    "react": "^19.3.0",
+    "react-dom": "^19.3.0",
+    "server-only": "^0.0.1",
+    "tailwind-merge": "^3.6.0",
+    "unpdf": "^1.8.1",
+    "ws": "^8.22.0"
+  },
+  "devDependencies": {
+    "@types/node": "^20",
+    "@types/react": "^19.3.0",
+    "@types/react-dom": "^19.3.0",
+    "@types/ws": "^8.18.2",
+    "eslint": "^9.39.5",
+    "eslint-config-next": "^16.4.0",
+    "playwright": "1.63.0",
+    "postcss": "^8",
+    "tailwindcss": "^3.4.1",
+    "typescript": "^5",
+    "vitest": "^3.2.7"
+  },
+  "engines": {
+    "node": ">=20.9.0"
+  }
+}
