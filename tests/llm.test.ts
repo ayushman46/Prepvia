@@ -139,6 +139,62 @@ describe("streamCompletion provider chain", () => {
     expect(fetchMock).toHaveBeenCalledTimes(1);
   });
 
+  /** A request the provider accepts but never starts streaming (queued or stalled). */
+  const hangingResponse = (_url: string, init: RequestInit) =>
+    new Promise<Response>((_, reject) => init.signal?.addEventListener("abort", () => reject(init.signal?.reason)));
+  const modelsCalled = (fetchMock: ReturnType<typeof vi.fn>) =>
+    fetchMock.mock.calls.map((call) => JSON.parse((call[1] as RequestInit).body as string).model as string);
+
+  it("abandons a live provider that hasn't started streaming within the first-token timeout", async () => {
+    process.env.LLM_FALLBACK_GROQ = "false";
+    process.env.LLM_HEDGE_MS = "10000";
+    process.env.LLM_REALTIME_FIRST_TOKEN_TIMEOUT = "0.05";
+    const fetchMock = vi
+      .fn()
+      .mockImplementationOnce(hangingResponse) // primary is stuck in a queue
+      .mockResolvedValueOnce(sseResponse(["Backup answered."]));
+    vi.stubGlobal("fetch", fetchMock);
+    const started = Date.now();
+    const chunks = await collect(streamCompletion([{ role: "user", content: "x" }], "realtime"));
+    expect(chunks.join("")).toBe("Backup answered.");
+    expect(Date.now() - started).toBeLessThan(2_000);
+    expect(modelsCalled(fetchMock)).toEqual(["nvidia/nemotron-3-super-120b-a12b", "nvidia/nemotron-3.5-lightning-30b-a3b"]);
+  });
+
+  it("retries a live turn once when every provider failed quickly (burst 429 + stalled backup)", async () => {
+    process.env.LLM_FALLBACK_GROQ = "false";
+    process.env.LLM_HEDGE_MS = "10000";
+    process.env.LLM_REALTIME_FIRST_TOKEN_TIMEOUT = "0.05";
+    const fetchMock = vi
+      .fn()
+      .mockResolvedValueOnce(new Response("rate limited", { status: 429 })) // primary: burst limit
+      .mockImplementationOnce(hangingResponse) // backup model stalls
+      .mockResolvedValueOnce(sseResponse(["Recovered."])); // primary again, a moment later
+    vi.stubGlobal("fetch", fetchMock);
+    const chunks = await collect(streamCompletion([{ role: "user", content: "x" }], "realtime"));
+    expect(chunks.join("")).toBe("Recovered.");
+    expect(modelsCalled(fetchMock)).toEqual([
+      "nvidia/nemotron-3-super-120b-a12b",
+      "nvidia/nemotron-3.5-lightning-30b-a3b",
+      "nvidia/nemotron-3-super-120b-a12b",
+    ]);
+  });
+
+  it("does not retry outside the live retry window, or for background work", async () => {
+    process.env.LLM_FALLBACK_GROQ = "false";
+    process.env.LLM_REALTIME_RETRY_WINDOW = "0";
+    let fetchMock = vi.fn(async () => new Response("unavailable", { status: 503 }));
+    vi.stubGlobal("fetch", fetchMock);
+    await expect(collect(streamCompletion([{ role: "user", content: "x" }], "realtime"))).rejects.toBeInstanceOf(LlmError);
+    expect(fetchMock).toHaveBeenCalledTimes(2); // primary + backup model, no second round
+
+    delete process.env.LLM_REALTIME_RETRY_WINDOW;
+    fetchMock = vi.fn(async () => new Response("unavailable", { status: 503 }));
+    vi.stubGlobal("fetch", fetchMock);
+    await expect(collect(streamCompletion([{ role: "user", content: "x" }], "analysis"))).rejects.toBeInstanceOf(LlmError);
+    expect(fetchMock).toHaveBeenCalledTimes(1); // background calls retry in complete() instead
+  });
+
   it("throws a non-retryable error when no provider is configured", async () => {
     delete process.env.NVIDIA_API_KEY;
     delete process.env.GROQ_API_KEY;

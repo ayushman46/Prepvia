@@ -221,7 +221,8 @@ export function useInterview(sessionId: string) {
       turn.revealed.add(seq);
       dispatch({ type: "update_message", id: turn.messageId, append: text, pending: false });
     }
-    if (interrupted && rest.length) dispatch({ type: "update_message", id: turn.messageId, interrupted: true });
+    // Cut off mid-sentence counts too, even when every sentence had started playing.
+    if (interrupted) dispatch({ type: "update_message", id: turn.messageId, interrupted: true });
   }, []);
 
   const load = useCallback(

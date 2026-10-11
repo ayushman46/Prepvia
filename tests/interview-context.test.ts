@@ -171,7 +171,30 @@ describe("parseJsonObject robustness (LLM output defects)", () => {
   });
 
   it("repairJson leaves valid JSON unchanged", () => {
-    const valid = '{"a": [1, 2, {"b": "c, d"}], "e": "f}g"}';
+    const valid = '{"a": [1, 2, {"b": "c, d"}], "e": "f}g", "h": "say \\"hi\\", then", "i": [true, null, "j"]}';
     expect(JSON.parse(repairJson(valid))).toEqual(JSON.parse(valid));
+  });
+
+  it("repairs semicolons used as separators (seen from the live report model)", () => {
+    const text =
+      '{"score": 78, "competency_scores": [{"name": "Ownership", "evidence": ["I don\'t know, honestly. I wasn\'t involved in that part."; "I\'d invest earlier in contract tests"]}]}';
+    const parsed = parseJsonObject(text, { requiredKeys: ["score", "competency_scores"] });
+    expect((parsed?.competency_scores as { evidence: string[] }[])[0].evidence).toEqual([
+      "I don't know, honestly. I wasn't involved in that part.",
+      "I'd invest earlier in contract tests",
+    ]);
+  });
+
+  it("escapes quotations inside strings", () => {
+    const text = '{"score": 70, "competency_scores": [{"name": "Communication", "rationale": "Said "I led the cutover", then gave numbers."}]}';
+    const parsed = parseJsonObject(text, { requiredKeys: ["score", "competency_scores"] });
+    expect((parsed?.competency_scores as { rationale: string }[])[0].rationale).toBe('Said "I led the cutover", then gave numbers.');
+  });
+
+  it("inserts missing commas between values", () => {
+    const text = '{"score": 64 "competency_scores": [{"name": "A", "score": 3} {"name": "B", "score": 4}], "strengths": ["x"]}';
+    const parsed = parseJsonObject(text, { requiredKeys: ["score", "competency_scores"] });
+    expect(parsed?.score).toBe(64);
+    expect((parsed?.competency_scores as { name: string }[]).map((c) => c.name)).toEqual(["A", "B"]);
   });
 });

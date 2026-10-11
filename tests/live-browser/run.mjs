@@ -377,6 +377,21 @@ async function scenarioCanvas(browser, fixtures) {
     await waitForStatus(page, /Your turn/, 60_000);
   });
 
+  await step("leaving the tab mid-interview is noticed and recorded", async () => {
+    // Headless Chromium doesn't change visibility on tab switches, so drive the
+    // same browser events the app listens to: hidden for ~1.6 s, then visible.
+    const setVisibility = (state) =>
+      page.evaluate((value) => {
+        Object.defineProperty(document, "visibilityState", { value, configurable: true });
+        Object.defineProperty(document, "hidden", { value: value === "hidden", configurable: true });
+        document.dispatchEvent(new Event("visibilitychange"));
+      }, state);
+    await setVisibility("hidden");
+    await sleep(1_600);
+    await setVisibility("visible");
+    await page.getByText("Leaving the interview tab is noted in your report.").waitFor({ timeout: 5_000 });
+  });
+
   const sectionsSeen = new Set();
   await step("sections advance and the canvas opens with a generated exercise at hands-on time", async () => {
     const answers = [
@@ -400,6 +415,15 @@ async function scenarioCanvas(browser, fixtures) {
     return `sections seen: ${[...sectionsSeen].join(" → ")}; exercise: "${title}"`;
   });
 
+  await step("large pastes into the canvas are recorded as a session signal", async () => {
+    await page.locator(".cm-content").evaluate((el) => {
+      const data = new DataTransfer();
+      data.setData("text/plain", "x = 1\n".repeat(80));
+      el.dispatchEvent(new ClipboardEvent("paste", { clipboardData: data, bubbles: true, cancelable: true }));
+    });
+    await sleep(800);
+  });
+
   await step("canvas edits autosave and are shared with the interviewer", async () => {
     await page.locator(".cm-content").click();
     await page.keyboard.press("ControlOrMeta+End");
@@ -411,26 +435,6 @@ async function scenarioCanvas(browser, fixtures) {
     });
     const reply = await answerByText(page, "I've added a cache keyed by request id; next I'd handle concurrent duplicates with a lock.");
     return `interviewer: "${reply.slice(0, 100)}…"`;
-  });
-
-  await step("large pastes and leaving the tab are recorded as session signals", async () => {
-    await page.locator(".cm-content").evaluate((el) => {
-      const data = new DataTransfer();
-      data.setData("text/plain", "x = 1\n".repeat(80));
-      el.dispatchEvent(new ClipboardEvent("paste", { clipboardData: data, bubbles: true, cancelable: true }));
-    });
-    // Headless Chromium doesn't change visibility on tab switches, so drive the
-    // same browser events the app listens to: hidden for ~1.6 s, then visible.
-    const setVisibility = (state) =>
-      page.evaluate((value) => {
-        Object.defineProperty(document, "visibilityState", { value, configurable: true });
-        Object.defineProperty(document, "hidden", { value: value === "hidden", configurable: true });
-        document.dispatchEvent(new Event("visibilitychange"));
-      }, state);
-    await setVisibility("hidden");
-    await sleep(1_600);
-    await setVisibility("visible");
-    await sleep(800);
   });
 
   await step("the interview closes itself when time is up and the report includes the hands-on exercise", async () => {
@@ -446,8 +450,10 @@ async function scenarioCanvas(browser, fixtures) {
     assert.ok(report.hands_on, "hands-on evaluation present");
     assert.ok(report.integrity.large_paste >= 1, "large paste recorded");
     assert.ok(report.integrity.tab_hidden >= 1, "leaving the tab recorded");
+    const lastAi = (await api(`/api/interview/${id}`)).body.transcript.filter((m) => m.role === "ai").at(-1).content;
+    assert.ok(!lastAi.includes("?"), `the interview ended on a question: "${lastAi}"`);
     notes.push({ canvas_report: { score: report.score, hands_on: report.hands_on, integrity: report.integrity } });
-    return `score ${report.score}; hands-on ${report.hands_on.rating}/5; signals: ${report.integrity.notes.join(" ") || "none"}`;
+    return `score ${report.score}; hands-on ${report.hands_on.rating}/5; signals: ${report.integrity.notes.join(" ") || "none"}; closing: "${lastAi.slice(0, 90)}"`;
   });
 
   await step("no client errors or server 5xx during the canvas flow", async () => {
@@ -556,7 +562,7 @@ try {
     await stopApp(handle);
   }
   if (SCENARIO === "all" || SCENARIO === "canvas") {
-    const handle = startApp({ INTERVIEW_CLOCK_SPEEDUP: "20" });
+    const handle = startApp({ INTERVIEW_CLOCK_SPEEDUP: "15" });
     await waitUntil(async () => (await fetch(`${BASE}/api/health`).catch(() => null))?.ok, { timeout: 60_000, message: "app health" });
     await scenarioCanvas(browser, fixtures);
     serverLogs.push(...handle.logs);

@@ -177,3 +177,74 @@ describe("isRepeatOf", () => {
     expect(isRepeatOf("Sure.", "Sure, let's continue.")).toBe(false);
   });
 });
+
+describe("isEndRequest", () => {
+  it("detects explicit requests to end the interview", async () => {
+    const { isEndRequest } = await import("@/server/interview-plan");
+    for (const text of [
+      "End interview.",
+      "end the interview",
+      "Let's end the interview now.",
+      "I want to stop the interview.",
+      "I'm done.",
+      "Let's finish here.",
+      "Thank you for the time. I'll end the interview now.",
+      "Thank you for the opportunity; I'm ending the interview now.",
+      "Can we wrap up the interview here?",
+      "End session.",
+      "I'd like to end this session.",
+    ]) {
+      expect(isEndRequest(text)).toBe(true);
+    }
+  });
+
+  it("does not end the interview on technical answers about sessions", async () => {
+    const { isEndRequest } = await import("@/server/interview-plan");
+    for (const text of [
+      "When the user logs out, we end the session and revoke the token.",
+      "I'd end the session after 30 minutes of inactivity.",
+      "We stop the session timer when the tab is hidden.",
+    ]) {
+      expect(isEndRequest(text)).toBe(false);
+    }
+  });
+
+  it("ignores answers and softer questions", async () => {
+    const { isEndRequest } = await import("@/server/interview-plan");
+    for (const text of [
+      "Can we just stop here? I'm kind of tired.",
+      "I'd stop the consumer, drain the queue, then end the migration window.",
+      "We decided to end support for the old API after the interview loop with customers showed low usage.",
+      "",
+    ]) {
+      expect(isEndRequest(text)).toBe(false);
+    }
+  });
+});
+
+describe("PREMATURE_WRAP_UP", () => {
+  it("catches goodbyes and wrap-up language but not ordinary interview phrasing", async () => {
+    const { PREMATURE_WRAP_UP } = await import("@/server/interview-plan");
+    for (const text of ["You're welcome. Take care.", "You too. Have a great day.", "That concludes our interview.", "Goodbye, Jane!"]) {
+      expect(PREMATURE_WRAP_UP.test(text)).toBe(true);
+    }
+    for (const text of ["Take care to handle duplicate requests: how would you do it?", "How do you take care of retries?", "What did you learn from that day?"]) {
+      expect(PREMATURE_WRAP_UP.test(text)).toBe(false);
+    }
+  });
+});
+
+describe("live prompt question history", () => {
+  it("lists every question asked so far, not just the most recent ten", () => {
+    const asked = Array.from({ length: 15 }, (_, i) => ({ number: i + 1, phase: "technical", topic: "x", question: `Distinct question number ${i + 1}?` }));
+    const session = {
+      candidate_name: "Jane",
+      target_role: "SRE",
+      interview_state: { ...defaultInterviewState(), questions_asked: asked },
+      interview_memory: defaultInterviewMemory(),
+    };
+    const system = buildLiveMessages(buildInterviewContext(session, [], true), "G", [])[0].content;
+    expect(system).toContain("Distinct question number 1?");
+    expect(system).toContain("Distinct question number 15?");
+  });
+});

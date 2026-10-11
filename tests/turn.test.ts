@@ -54,7 +54,7 @@ vi.mock("@/server/llm", async (importOriginal) => {
   };
 });
 
-const { runTurn } = await import("@/server/turn");
+const { runTurn, closingLine } = await import("@/server/turn");
 const { LlmError } = await import("@/server/llm");
 const { SttError } = await import("@/server/stt");
 
@@ -280,8 +280,9 @@ describe("runTurn: interview quality guards", () => {
   it("regenerates up to twice when the model keeps repeating itself, then accepts", async () => {
     const earlier = "You mentioned owning the cutover plan. Can you walk me through one specific decision you made?";
     store.transcripts = [
-      { role: "ai", content: earlier },
+      { role: "ai", content: "Tell me about the migration?" },
       { role: "user", content: "We used an outbox table." },
+      { role: "ai", content: earlier },
     ];
     let call = 0;
     providers.tokens.mockImplementation(() =>
@@ -289,6 +290,14 @@ describe("runTurn: interview quality guards", () => {
     );
     const { events } = await run({ kind: "text", text: "Kafka consumers." }, inProgress(6));
     expect(providers.calls).toHaveLength(3);
+    // The final attempt drops the dialogue, including the previous reply being copied,
+    // and keeps only the candidate's latest message.
+    expect(providers.calls[0].length).toBeGreaterThan(providers.calls[2].length);
+    expect(providers.calls[2].map((m) => m.content)).not.toContain(earlier);
+    expect(providers.calls[2][0].content).toContain("You mentioned owning the cutover plan. Can you walk me…");
+    expect(providers.calls[2][0].content).not.toContain("one specific decision"); // only a short excerpt is quoted
+    expect(providers.calls[2].at(-1)?.role).toBe("user");
+    expect(providers.calls[2].at(-1)?.content.endsWith("Kafka consumers.")).toBe(true);
     expect(events.find((e): e is Extract<TurnEvent, { type: "metrics" }> => e.type === "metrics")?.metrics.regenerated).toBe(2);
     const spoken = events.filter((e) => e.type === "ai_sentence").map((e) => (e as { content: string }).content).join(" ");
     expect(spoken).toBe("Which failure mode worried you most during the cutover?");
@@ -504,5 +513,137 @@ describe("isAcknowledgement", () => {
     const { isAcknowledgement } = await import("@/server/turn");
     for (const text of ["Got it.", "Okay.", "No problem.", "Thanks, Jane.", "Sure!"]) expect(isAcknowledgement(text)).toBe(true);
     for (const text of ["Why Kafka?", "That makes sense for a payments ledger with retries.", "Okay so what"]) expect(isAcknowledgement(text)).toBe(false);
+  });
+});
+
+describe("runTurn: ending and premature wrap-up", () => {
+  it("closes the interview on an explicit end request", async () => {
+    store.transcripts = [{ role: "ai", content: "Tell me about a conflict you resolved?" }];
+    providers.tokens.mockImplementation(() => tokens(["Of course, Jane. Thanks for your time; the interview is complete. <<END>>"]));
+    const { events, result } = await run({ kind: "text", text: "End interview." }, inProgress(6));
+    expect(lastSystemPrompt()).toMatch(/Current section: closing/);
+    expect(events.at(-1)).toEqual({ type: "done", limit_reached: true });
+    expect(result.analysis).toBeNull(); // an end request is not an answer to analyze
+  });
+
+  it("does not treat a softer 'can we stop here?' as an end request", async () => {
+    store.transcripts = [{ role: "ai", content: "How did you test it?" }];
+    providers.tokens.mockImplementation(() => tokens(["You can press End interview any time. Shall we try one more question?"]));
+    const { events } = await run({ kind: "text", text: "Can we just stop here? I'm kind of tired." }, inProgress(6));
+    expect(lastSystemPrompt()).not.toMatch(/Current section: closing/);
+    expect(events.at(-1)).toEqual({ type: "done" });
+  });
+
+  it("rejects wrap-up language before the wrap-up section and regenerates with time remaining", async () => {
+    store.transcripts = [{ role: "ai", content: "Tell me about a hard trade-off?" }];
+    let call = 0;
+    providers.tokens.mockImplementation(() =>
+      call++ === 0
+        ? tokens(["We've reached the end of the behavioral section. You can now press End interview to get your report."])
+        : tokens(["Got it. ", "What would you do differently if you faced that trade-off again?"]),
+    );
+    const { events } = await run({ kind: "text", text: "We chose consistency over speed." }, inProgress(10));
+    expect(providers.calls).toHaveLength(2);
+    expect(providers.calls[1][0].content).toMatch(/The interview is NOT over: about \d+ minutes remain/);
+    const spoken = events.filter((e) => e.type === "ai_sentence").map((e) => (e as { content: string }).content).join(" ");
+    expect(spoken).toBe("Got it. What would you do differently if you faced that trade-off again?");
+  });
+
+  it("allows closing language during wrap-up", async () => {
+    store.transcripts = [{ role: "ai", content: "Any questions for me?" }];
+    providers.tokens.mockImplementation(() => tokens(["That concludes our interview, thank you Jane. <<END>>"]));
+    const { events } = await run({ kind: "text", text: "No, thanks." }, inProgress(28));
+    expect(providers.calls).toHaveLength(1);
+    expect(events.at(-1)).toEqual({ type: "done", limit_reached: true });
+  });
+
+  it("rejects a goodbye in the middle of the interview and continues with a question", async () => {
+    store.transcripts = [{ role: "ai", content: "How do you prioritize roadmap work?" }];
+    let call = 0;
+    providers.tokens.mockImplementation(() =>
+      call++ === 0 ? tokens(["You're welcome. ", "Take care."]) : tokens(["Got it. ", "How did you decide what to cut when the deadline moved?"]),
+    );
+    const { events } = await run({ kind: "text", text: "Thanks, Aria. Take care!" }, inProgress(10));
+    expect(providers.calls).toHaveLength(2);
+    expect(providers.calls[1][0].content).toMatch(/The interview is NOT over/);
+    const spoken = events.filter((e) => e.type === "ai_sentence").map((e) => (e as { content: string }).content).join(" ");
+    expect(spoken).toBe("You're welcome. How did you decide what to cut when the deadline moved?");
+    expect(events.at(-1)).toEqual({ type: "done" });
+  });
+
+  it("regenerates an empty draft mid-interview instead of failing the turn", async () => {
+    store.transcripts = [{ role: "ai", content: "How do you prioritize roadmap work?" }];
+    let call = 0;
+    providers.tokens.mockImplementation(() => (call++ === 0 ? tokens(["<<END>>"]) : tokens(["Okay. ", "What signal told you the launch was working?"])));
+    const { events } = await run({ kind: "text", text: "Thank you! Have a great day." }, inProgress(10));
+    expect(providers.calls).toHaveLength(2);
+    expect(providers.calls[1][0].content).toMatch(/your draft said nothing/);
+    expect(types(events)).not.toContain("error");
+    expect(events.at(-1)).toEqual({ type: "done" }); // an end marker before wrap-up never ends the interview
+  });
+
+  it("ignores an end marker before the wrap-up section", async () => {
+    store.transcripts = [{ role: "ai", content: "How do you prioritize roadmap work?" }];
+    providers.tokens.mockImplementation(() => tokens(["Understood, I appreciate you walking me through that process. <<END>>"]));
+    const { events } = await run({ kind: "text", text: "We use RICE scoring." }, inProgress(10));
+    expect(events.at(-1)).toEqual({ type: "done" });
+  });
+
+  it("closes with a closing line when a wrap-up reply is only the end marker", async () => {
+    store.transcripts = [{ role: "ai", content: "Any questions for me?" }];
+    providers.tokens.mockImplementation(() => tokens(["<<END>>"]));
+    const { events } = await run({ kind: "text", text: "No, thank you. Have a great day!" }, inProgress(28));
+    expect(providers.calls).toHaveLength(1);
+    expect(store.transcripts.at(-1)?.content).toBe(closingLine("Jane"));
+    expect(events.at(-1)).toEqual({ type: "done", limit_reached: true });
+  });
+
+  it("never ends the interview on a question: a question in the closing turn is replaced by a closing line", async () => {
+    store.transcripts = [{ role: "ai", content: "How would you handle duplicates?" }];
+    providers.tokens.mockImplementation(() => tokens(["I see you cache results by request id. ", "Could you explain how the lock is released?"]));
+    const { events } = await run({ kind: "text", text: "I added a lock around the cache." }, inProgress(33));
+    const spoken = events.filter((e) => e.type === "ai_sentence").map((e) => (e as { content: string }).content);
+    expect(spoken).toEqual([
+      "I see you cache results by request id.",
+      "Thank you, Jane. That completes our interview, and your feedback report is ready for you now.",
+    ]);
+    expect(events.filter((e) => e.type === "audio")).toHaveLength(2);
+    expect(store.transcripts.at(-1)?.content).toBe(spoken.join(" "));
+    expect(events.at(-1)).toEqual({ type: "done", limit_reached: true });
+  });
+
+  it("still closes the interview when generation fails on the closing turn", async () => {
+    store.transcripts = [{ role: "ai", content: "Last thing?" }];
+    providers.tokens.mockImplementation(async function* () {
+      throw new LlmError("nvidia 503");
+    });
+    const { events } = await run({ kind: "text", text: "Here's my answer." }, inProgress(33));
+    expect(types(events)).not.toContain("error");
+    expect(store.transcripts.at(-1)).toEqual({ role: "ai", content: closingLine("Jane Doe") });
+    expect(events.at(-1)).toEqual({ type: "done", limit_reached: true });
+  });
+
+  it("speaks a closing line when the closing reply is only the end marker", async () => {
+    store.transcripts = [{ role: "ai", content: "Press End interview at any time to get your feedback report." }];
+    providers.tokens.mockImplementation(() => tokens(["<<END>>"]));
+    const { events } = await run({ kind: "text", text: "Thank you for the time. I'll end the interview now." }, inProgress(9));
+    expect(types(events)).not.toContain("error");
+    expect(store.transcripts.at(-1)?.content).toBe(closingLine("Jane"));
+    expect(events.at(-1)).toEqual({ type: "done", limit_reached: true });
+  });
+
+  it("keeps a closing reply that already ends the interview as is", async () => {
+    store.transcripts = [{ role: "ai", content: "Last thing?" }];
+    providers.tokens.mockImplementation(() => tokens(["Thanks, Jane, we're out of time and the interview is complete."]));
+    const { events } = await run({ kind: "text", text: "Here's my answer." }, inProgress(33));
+    const spoken = events.filter((e) => e.type === "ai_sentence").map((e) => (e as { content: string }).content);
+    expect(spoken).toEqual(["Thanks, Jane, we're out of time and the interview is complete."]);
+  });
+
+  it("does not end on an end marker that follows a question", async () => {
+    store.transcripts = [{ role: "ai", content: "What would you improve?" }];
+    providers.tokens.mockImplementation(() => tokens(["Got it. Do you have any questions for me? <<END>>"]));
+    const { events } = await run({ kind: "text", text: "Better monitoring." }, inProgress(28));
+    expect(events.at(-1)).toEqual({ type: "done" });
   });
 });

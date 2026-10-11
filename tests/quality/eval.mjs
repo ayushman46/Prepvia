@@ -25,7 +25,7 @@ const args = new Map(process.argv.slice(2).map((a) => a.replace(/^--/, "").split
 // creates artificial pressure on the shared ~40 requests/minute LLM limit.
 const PACE_MS = Number(args.get("pace") ?? 6000);
 const SPEEDUP = Number(args.get("speedup") || (PACE_MS >= 3000 ? 6 : 18));
-const MAX_TURNS = 20;
+const MAX_TURNS = 24;
 const NVIDIA = "https://integrate.api.nvidia.com/v1/chat/completions";
 // The simulated candidate runs on models the app itself doesn't use, because NVIDIA's
 // free tier rate-limits each model separately (~40 requests/minute).
@@ -79,6 +79,17 @@ const PERSONAS = {
       "Yeah, it was fine. Nothing really went wrong.",
       "I think I'd just try different things until it works.",
       "Um, I don't really have a specific example.",
+      "Maybe I'd use an array? I'm not totally sure.",
+      "I think it was fast enough. Nobody complained.",
+      "I'd ask my senior for help with that.",
+      "Hmm, I guess I'd add some logs?",
+      "I haven't really done that before.",
+      "It's kind of like a loop, right? I forget the details.",
+      "I'd write some tests, I think, if there was time.",
+      "We just used whatever the tutorial said.",
+      "I'm not sure what you mean, sorry.",
+      "I like learning new things, I'm a fast learner.",
+      "I'd probably restart it and see if it works.",
       "No questions, I think. Thanks.",
     ],
   },
@@ -256,7 +267,7 @@ function checkTurns(turns) {
     if (words(text).length > limit) issues.push(`#${i} too long (${words(text).length} words)`);
     if (/[*#`]|^\s*[-•]\s/m.test(text)) issues.push(`#${i} contains markdown`);
     if (PRAISE.test(text.trim())) praise++;
-    if (/<<|TURN_GUIDANCE|INTERVIEW_STATE|INTERVIEW_MEMORY|system prompt|my instructions are/i.test(text)) issues.push(`#${i} leaks internals`);
+    if (/<<|TURN_GUIDANCE|INTERVIEW_STATE|INTERVIEW_MEMORY|\bsystem prompt\b|my instructions are/i.test(text)) issues.push(`#${i} leaks internals`);
     const beforeCanvas = canvasOpenedAt === -1 || i < canvasOpenedAt;
     if (beforeCanvas && t.section !== "hands_on" && !t.canvasIntro && /\b(coding (exercise|task)|write (some |the |a )?code|implement (a|the) function|in the canvas|on the canvas|on your screen)\b/i.test(text)) {
       issues.push(`#${i} brings up coding outside the hands-on section (${t.section})`);

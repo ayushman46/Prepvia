@@ -107,7 +107,7 @@ const SECTION_GOALS: Record<SectionId, string> = {
   technical:
     "Assess role-relevant technical or functional depth. Ask about concepts, design trade-offs, debugging, and scenarios tied to the JOB_DESCRIPTION and the candidate's stack. Raise difficulty when answers are strong.",
   hands_on:
-    "Run the hands-on exercise shown in the CANVAS. Ask the candidate to talk through their approach, then ask about specific choices in their current canvas work (edge cases, complexity, testing, alternatives). Do not write the solution for them.",
+    "Run the hands-on exercise shown in the CANVAS. Ask the candidate to talk through their approach, then ask about specific choices in their current canvas work (edge cases, complexity, testing, alternatives). Do not write the solution for them. You can read the canvas but cannot run code: never offer to execute it or run tests yourself.",
   behavioral:
     "Assess collaboration, ownership, conflict, failure, and prioritization with behavioral questions. Push for a specific situation, their own actions, and the outcome.",
   wrap_up:
@@ -121,6 +121,30 @@ export const END_MARKER = "<<END>>";
 /** Short candidate messages that ask the interviewer to repeat or rephrase. */
 const REPEAT_REQUEST =
   /\b(repeat|say (that|it) again|come again|didn'?t (catch|hear|get|understand)|pardon|rephrase|what was the question|one more time|missed (that|the question))\b/i;
+
+/**
+ * Explicit requests to end the interview ("End interview.", "Let's end the
+ * interview", "I'm done"). Softer questions like "can we stop here?" are left to
+ * the interviewer, who offers to continue.
+ */
+const STOP_VERB = "(end|ending|stop|stopping|finish|finishing|conclude|concluding|quit|quitting|leave|leaving|exit|exiting|wrap up|wrapping up)";
+const END_REQUEST = [
+  new RegExp(`\\b${STOP_VERB}\\s+(the\\s+|this\\s+|our\\s+|my\\s+)?interview\\b`, "i"),
+  // "Session" alone is too common in technical answers ("we end the session on logout").
+  new RegExp(`\\b${STOP_VERB}\\s+(this|our)\\s+session\\b`, "i"),
+  /^(please\s+)?(end|stop|finish)\s+(the\s+)?session[.!]?$/i,
+  /^(let'?s|lets)\s+(end|finish|stop)(\s+(it|here|now|there))?[.!]?$/i,
+  /^(i'?m|i am)\s+(done|finished)(\s+(now|here|for today))?[.!]?$/i,
+];
+
+export function isEndRequest(message: string): boolean {
+  const text = message.trim();
+  return text.length > 0 && text.length <= 80 && END_REQUEST.some((pattern) => pattern.test(text));
+}
+
+/** Wrap-up language that must not appear before the wrap-up section. */
+export const PREMATURE_WRAP_UP =
+  /\b(reached the end|end of (the|our|this) (interview|session|conversation)|that concludes|that'?s all (the time|we have|for today)|press end interview|thank you for your time today|this (wraps|brings) (up|us to the end)|take care(?! (?:to|of|with|that|when|not)\b)|good-?bye|best of luck|have a (great|good|nice|wonderful|lovely) (day|evening|weekend|one)|enjoy the rest of your day)\b/i;
 
 export function isRepeatRequest(message: string): boolean {
   const text = message.trim();

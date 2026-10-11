@@ -11,7 +11,16 @@ import {
   stateFromSession,
   type TranscriptEntry,
 } from "./interview-context";
-import { buildTurnInstruction, currentSection, elapsedSince, END_MARKER, isRepeatRequest, normalizePlan } from "./interview-plan";
+import {
+  buildTurnInstruction,
+  currentSection,
+  elapsedSince,
+  END_MARKER,
+  isEndRequest,
+  isRepeatRequest,
+  normalizePlan,
+  PREMATURE_WRAP_UP,
+} from "./interview-plan";
 import type { ChatMessage } from "./interview-context";
 import { LlmError, streamCompletion, streamSentences } from "./llm";
 import { logger } from "./logger";
@@ -90,12 +99,32 @@ async function* tapFirstToken(tokens: AsyncIterable<string>, onFirst: () => void
   }
 }
 
+const NOT_OVER_NOTE = (remaining: number) =>
+  `\n\nIMPORTANT: The interview is NOT over: about ${remaining} minute${remaining === 1 ? "" : "s"} remain. ` +
+  "Do not summarize, wrap up, thank the candidate for their time, or mention ending the interview. Ask your next question for this section.";
+
 const ANTI_REPEAT_NOTE = (repeated: string) =>
   `\n\nIMPORTANT: Your draft repeated an earlier reply or echoed the candidate: "${repeated.slice(0, 300)}". ` +
   "Respond to what the candidate actually just said, in completely different words, and ask a different question that has not been asked yet.";
 
+const EMPTY_NOTE =
+  "\n\nIMPORTANT: The interview is still in progress and your draft said nothing. " +
+  "Reply to the candidate's latest message in a sentence, then ask your next question for this section.";
+
 /** Regenerations allowed when a draft repeats itself (each at a higher temperature). */
 const MAX_REGENERATIONS = 2;
+
+/** A closing reply already thanks the candidate or says the interview is over. */
+const CLOSES_INTERVIEW = /\b(thank|thanks|complete[sd]?|conclude[sd]?|that'?s all|out of time|time is up|feedback report)\b/i;
+
+/**
+ * Spoken when the last turn needs a guaranteed ending: the model asked a question
+ * anyway (it could never be answered), said nothing, or failed.
+ */
+export function closingLine(candidateName: string): string {
+  const first = candidateName.trim().split(/\s+/)[0]?.slice(0, 40) ?? "";
+  return `Thank you${first ? `, ${first}` : ""}. That completes our interview, and your feedback report is ready for you now.`;
+}
 
 /**
  * A short neutral acknowledgement ("Got it.", "Okay.", "No problem.") can't be a
@@ -109,22 +138,30 @@ export function isAcknowledgement(sentence: string): boolean {
 
 async function* guardedSentences(
   messages: ChatMessage[],
+  /**
+   * Prompt for the final regeneration: same rules and grounding, but only the
+   * candidate's latest message, so a reply the model keeps copying is no longer
+   * in its context (repetition loops are in-context copying).
+   */
+  reducedMessages: ChatMessage[],
   /** Texts the reply must not parrot: earlier interviewer replies and the candidate's last message. */
   avoid: string[],
+  /** Minutes left when wrap-up language is not allowed yet; null when closing is allowed. */
+  notOverMinutes: number | null,
   hooks: {
     onFirstToken: () => void;
     onToken: (token: string) => void;
-    onRetry: () => void;
+    onRetry: (reason: "repeat" | "premature_wrap_up" | "empty") => void;
     onServed?: (provider: string, model: string) => void;
     /** A sentence was produced but is held back for the repeat check (start TTS early). */
     onHeld?: (sentence: string) => void;
   },
 ): AsyncGenerator<string> {
-  let rejected = "";
+  let note = "";
   let acknowledged = false;
   for (let attempt = 0; attempt <= MAX_REGENERATIONS; attempt++) {
-    const attemptMessages =
-      attempt === 0 ? messages : [{ ...messages[0], content: messages[0].content + ANTI_REPEAT_NOTE(rejected) }, ...messages.slice(1)];
+    const base = attempt === MAX_REGENERATIONS ? reducedMessages : messages;
+    const attemptMessages = attempt === 0 ? base : [{ ...base[0], content: base[0].content + note }, ...base.slice(1)];
     const iterator = streamSentences(
       tapFirstToken(
         streamCompletion(attemptMessages, "realtime", {
@@ -162,13 +199,26 @@ async function* guardedSentences(
       held.push(next.value);
       hooks.onHeld?.(next.value);
     }
-    if (held.length === 0) return;
-    const opening = held.join(" ");
-    if (attempt < MAX_REGENERATIONS && avoid.some((text) => text && text.length >= 12 && isRepeatOf(opening, text))) {
-      await iterator.return?.(undefined);
-      rejected = opening;
-      hooks.onRetry();
+    if (held.length === 0) {
+      // Nothing to say (or only the end marker) stalls the interview unless it may close now.
+      if (notOverMinutes === null || attempt >= MAX_REGENERATIONS) return;
+      note = EMPTY_NOTE;
+      hooks.onRetry("empty");
       continue;
+    }
+    const opening = held.join(" ");
+    if (attempt < MAX_REGENERATIONS) {
+      // Reject a draft that repeats/parrots, or that starts wrapping up too early.
+      const repeat = avoid.some((text) => text && text.length >= 12 && isRepeatOf(opening, text));
+      const prematureClose = notOverMinutes !== null && PREMATURE_WRAP_UP.test(opening);
+      if (repeat || prematureClose) {
+        await iterator.return?.(undefined);
+        // The last attempt sees only the first words: a full quote is itself something to copy.
+        const quoted = attempt + 1 === MAX_REGENERATIONS ? `${opening.split(/\s+/).slice(0, 10).join(" ")}…` : opening;
+        note = prematureClose ? NOT_OVER_NOTE(notOverMinutes as number) : ANTI_REPEAT_NOTE(quoted);
+        hooks.onRetry(prematureClose ? "premature_wrap_up" : "repeat");
+        continue;
+      }
     }
     try {
       for (const sentence of held) yield sentence;
@@ -290,7 +340,9 @@ export async function runTurn(
   const state = stateFromSession(session);
   const elapsedMs = opening ? 0 : elapsedSince(session.started_at) * testing.clockSpeedup;
   const answeredTurns = turnCount + (userText ? 1 : 0);
-  const forceClose = answeredTurns >= maxTurns;
+  // An explicit "end the interview" closes it now (the report button appears).
+  const endRequested = hasNewAnswer && isEndRequest(answerForAnalysis);
+  const forceClose = answeredTurns >= maxTurns || endRequested;
   let section = currentSection(plan, elapsedMs, state.question_number);
   let canvasMissing = false;
   if (section === "hands_on" && !session.canvas?.task) {
@@ -326,7 +378,10 @@ export async function runTurn(
   });
   metrics.section = forceClose ? "closing" : section;
   const includeCanvas = !!session.canvas?.introduced_at || !!introduceCanvas;
-  const messages = buildLiveMessages(buildInterviewContext(session, history, true, { includeCanvas }), instruction, history);
+  const liveContext = buildInterviewContext(session, history, true, { includeCanvas });
+  const messages = buildLiveMessages(liveContext, instruction, history);
+  // Only the candidate's latest message: the reply being copied is often the previous one.
+  const reducedMessages = buildLiveMessages(liveContext, instruction, history.slice(-1));
   const lastCandidateMessage = hasNewAnswer ? answerForAnalysis : "";
 
   // ---- 3. Stream the reply and synthesize sentences concurrently ----------
@@ -351,19 +406,49 @@ export async function runTurn(
   let raw = "";
   let seq = 0;
   let generationError: unknown = null;
+  // Decided before generation: this reply ends the interview whatever the model says.
+  const finalTurn = forceClose || section === "closing";
+  const closingAllowed = finalTurn || section === "wrap_up";
+  let droppedQuestion = false;
+
+  const speak = (sentence: string) => {
+    seq += 1;
+    const current = seq;
+    sentences.push(sentence);
+    if (current === 1) metrics.first_sentence_ms = since();
+    emit({ type: "ai_sentence", seq: current, content: sentence });
+    if (!config.tts.enabled) {
+      emit({ type: "audio_error", seq: current });
+      return;
+    }
+    ttsTasks.push(
+      synthesize(sentence).then(
+        (audio) => {
+          if (metrics.first_audio_ms === undefined) metrics.first_audio_ms = since();
+          emit({ type: "audio", seq: current, data: audio.toString("base64"), mime: "audio/mpeg" });
+        },
+        (error) => {
+          // Release the sequence so one failed sentence never stalls playback.
+          logger.warn("TTS failed for sentence", error, { sessionId, seq: current });
+          emit({ type: "audio_error", seq: current });
+        },
+      ),
+    );
+  };
 
   try {
     // When asked to repeat, restating the last question is the point; only guard against echoing the candidate.
     const earlierReplies = history.filter((m) => m.role === "ai").map((m) => m.content);
     const avoid = repeatRequested ? [lastCandidateMessage] : [...earlierReplies, lastCandidateMessage];
-    const replies = guardedSentences(messages, avoid, {
+    const remainingMinutes = Math.max(1, Math.round(plan.duration_minutes - elapsedMs / 60_000));
+    const replies = guardedSentences(messages, reducedMessages, avoid, closingAllowed ? null : remainingMinutes, {
       onFirstToken: () => (metrics.llm_first_token_ms ??= since()),
       onToken: (token) => (raw += token),
-      onRetry: () => {
+      onRetry: (reason) => {
         raw = "";
         earlyTts.clear(); // discard audio for the rejected draft
         metrics.regenerated = (metrics.regenerated ?? 0) + 1;
-        logger.warn("Interviewer repeated an earlier reply; regenerating", undefined, { sessionId, model: metrics.model });
+        logger.warn("Interviewer draft rejected; regenerating", undefined, { sessionId, reason, model: metrics.model });
       },
       onServed: (_provider, model) => {
         metrics.model = model;
@@ -377,38 +462,27 @@ export async function runTurn(
       },
     });
     for await (const sentence of replies) {
-      seq += 1;
-      const current = seq;
-      sentences.push(sentence);
-      if (current === 1) metrics.first_sentence_ms = since();
-      emit({ type: "ai_sentence", seq: current, content: sentence });
-
-      if (!config.tts.enabled) {
-        emit({ type: "audio_error", seq: current });
-        if (/\?["')\]]*$/.test(sentence) || current >= MAX_SENTENCES) break;
-        continue;
+      // The last turn must not ask anything: the candidate could never answer it.
+      if (finalTurn && sentence.includes("?")) {
+        droppedQuestion = true;
+        break;
       }
-      const isQuestion = /\?["')\]]*$/.test(sentence);
-      ttsTasks.push(
-        synthesize(sentence).then(
-          (audio) => {
-            if (metrics.first_audio_ms === undefined) metrics.first_audio_ms = since();
-            emit({ type: "audio", seq: current, data: audio.toString("base64"), mime: "audio/mpeg" });
-          },
-          (error) => {
-            // Release the sequence so one failed sentence never stalls playback.
-            logger.warn("TTS failed for sentence", error, { sessionId, seq: current });
-            emit({ type: "audio_error", seq: current });
-          },
-        ),
-      );
+      speak(sentence);
       // One question per turn, enforced: anything after the first question (or past
       // the sentence cap) would never be heard well in a voice interview.
-      if (isQuestion || current >= MAX_SENTENCES) break;
+      if (/\?["')\]]*$/.test(sentence) || seq >= MAX_SENTENCES) break;
     }
   } catch (error) {
     generationError = error;
     logger.error("Interviewer generation failed", error, { sessionId, sentences: sentences.length });
+  }
+  // The end marker closes the interview only once closing is allowed, and never right
+  // after a question ("Any questions for me? <<END>>" would cut off the answer).
+  const closes = finalTurn || (closingAllowed && raw.includes(END_MARKER) && !sentences.join(" ").includes("?"));
+  // The interview always ends cleanly, even if the model asked a question, said nothing, or failed.
+  if (closes && (droppedQuestion || !CLOSES_INTERVIEW.test(sentences.join(" ")))) {
+    if (droppedQuestion) logger.warn("Dropped a question from the closing turn", undefined, { sessionId });
+    speak(closingLine(session.candidate_name ?? ""));
   }
 
   await Promise.all(ttsTasks);
@@ -436,7 +510,7 @@ export async function runTurn(
     (section === "wrap_up" || section === "closing") &&
     !fullText.includes("?") &&
     /\b(take care|best of luck|good luck|goodbye|that'?s all the time|this concludes|interview is (now )?(complete|over|finished)|have a (great|good|wonderful) (day|evening|one))\b/i.test(fullText);
-  const ended = forceClose || section === "closing" || raw.includes(END_MARKER) || farewell;
+  const ended = closes || farewell;
   const update = recordQuestion(state, fullText);
   await appendTranscript(sessionId, "ai", fullText);
   sessionUpdate.question = repeatRequested ? null : update;
@@ -447,7 +521,8 @@ export async function runTurn(
   emit({ type: "done", limit_reached: ended || undefined });
   logger.info("turn", { sessionId, ...metrics, sentences: sentences.length, ended });
 
-  result.analysis = answerForAnalysis && !repeatRequested ? { question: previousQuestion, answer: answerForAnalysis } : null;
+  result.analysis =
+    answerForAnalysis && !repeatRequested && !endRequested ? { question: previousQuestion, answer: answerForAnalysis } : null;
   result.prepareCanvas = plan.canvas_enabled && (opening || canvasMissing);
   result.context = { session, transcripts: [...history, { role: "ai", content: fullText }] };
   return result;

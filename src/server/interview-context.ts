@@ -193,7 +193,9 @@ export function buildInterviewContext(
       source_text: clip(jobDescription, jobLimit),
       source_lines: sourceLines(jobDescription, lineLimit),
     },
-    interview_state: stateFromSession(session, memoryLimit),
+    // Every question asked so far stays visible (they are short), so the
+    // interviewer never re-asks something from early in a long interview.
+    interview_state: stateFromSession(session, MAX_MEMORY_ITEMS),
     interview_memory: memoryFromSession(session, memoryLimit),
     recent_conversation: transcripts.slice(-recentLimit).map((message) => ({
       role: message.role === "user" ? "candidate" : "interviewer",
@@ -236,6 +238,7 @@ Grounding:
 - Never invent a candidate's technology, employer, project detail, metric, education, or experience. If something is missing or unclear, ask.
 - Treat your own knowledge as general domain knowledge, never as evidence about the candidate.
 - Evaluate valid alternative solutions fairly; never require one preferred implementation.
+- If the candidate asks about the company, team, or role, answer only from JOB_DESCRIPTION and say plainly when you don't know. Never invent company practices, tools, or metrics.
 
 How you speak (your words are converted to speech):
 - Natural conversational English with contractions. One to three short sentences, usually under 50 words.
@@ -306,7 +309,7 @@ export function buildLiveMessages(context: InterviewContext, guidance: string, t
     jsonSection("RESUME", context.resume),
     jsonSection("JOB_DESCRIPTION", context.job_description),
     jsonSection("INTERVIEW_STATE", {
-      questions_asked: state.questions_asked.map((q) => q.question),
+      questions_asked: state.questions_asked.map((q) => clip(q.question, 220)),
       topics_covered: state.topics_covered,
       current_difficulty: state.current_difficulty,
     }),
@@ -474,12 +477,25 @@ export function stripReasoning(text: string): string {
  * inside strings, stray control characters, and truncation (unclosed strings,
  * arrays and objects are closed after dropping an incomplete trailing token).
  */
+/** Whether the quote at `index` ends the string: it must be followed by JSON structure, not more text. */
+function closesString(input: string, index: number): boolean {
+  let j = index + 1;
+  while (j < input.length && /\s/.test(input[j])) j++;
+  if (j >= input.length || /[}\]:;]/.test(input[j])) return true;
+  if (input[j] !== ",") return false;
+  j++;
+  while (j < input.length && /\s/.test(input[j])) j++;
+  return j >= input.length || /["{[\]}\-0-9]/.test(input[j]) || /^(true|false|null)\b/.test(input.slice(j, j + 6));
+}
+
 export function repairJson(input: string): string {
   let out = "";
   const stack: string[] = [];
   let inString = false;
   let escaped = false;
-  for (const ch of input) {
+  let last = ""; // last significant character written outside strings
+  for (let i = 0; i < input.length; i++) {
+    const ch = input[i];
     if (inString) {
       if (escaped) {
         escaped = false;
@@ -488,8 +504,11 @@ export function repairJson(input: string): string {
         escaped = true;
         out += ch;
       } else if (ch === '"') {
-        inString = false;
-        out += ch;
+        if (closesString(input, i)) {
+          inString = false;
+          out += ch;
+          last = ch;
+        } else out += '\\"'; // a quotation inside the text, e.g. quoting the candidate
       } else if (ch === "\n") out += "\\n";
       else if (ch === "\r") out += "\\r";
       else if (ch === "\t") out += "\\t";
@@ -497,11 +516,19 @@ export function repairJson(input: string): string {
       else out += ch;
       continue;
     }
+    if (ch === ";") {
+      out += ","; // ["a"; "b"]: a separator typo, never valid outside a string
+      last = ",";
+      continue;
+    }
+    // A value that directly follows another value is missing its comma.
+    if (/["{[]/.test(ch) && /["}\]\d]|e|l/.test(last)) out += ",";
     if (ch === '"') inString = true;
     else if (ch === "{") stack.push("}");
     else if (ch === "[") stack.push("]");
     else if (ch === "}" || ch === "]") stack.pop();
     out += ch;
+    if (!/\s/.test(ch)) last = ch;
   }
   if (inString) out += '"';
   if (stack.length) {

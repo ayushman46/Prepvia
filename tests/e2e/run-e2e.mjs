@@ -246,8 +246,15 @@ await step("concurrent turns are serialized with a 409", async () => {
   assert.equal(rejected.body.error.code, "turn_in_progress");
 });
 
+await step("a brief outage of every provider is retried automatically within the live turn", async () => {
+  await fake("/fail-next-chat", { count: 3 }); // primary, backup model, and Groq fallback each fail once
+  const { events } = await turn(sessionId, { text: "We replayed the dead-letter queue after the fix." });
+  assert.ok(types(events).includes("ai_done"), types(events).join(","));
+  assert.ok(!types(events).includes("error"));
+});
+
 await step("LLM outage on every provider is reported and the saved answer is answered on retry", async () => {
-  await fake("/fail-next-chat", { count: 3 }); // primary, backup model, and Groq fallback all fail
+  await fake("/fail-next-chat", { count: 6 }); // every provider fails in both rounds
   const failed = await turn(sessionId, { text: "I used idempotency keys to avoid double charges." });
   assert.equal(failed.events.at(-1).type, "error");
   assert.equal(failed.events.at(-1).code, "llm_failed");
@@ -272,7 +279,7 @@ await step("session view returns the persisted transcript without leaked error t
   const roles = body.transcript.map((m) => m.role);
   for (let i = 1; i < roles.length; i++) assert.ok(!(roles[i] === "ai" && roles[i - 1] === "ai"), "no consecutive interviewer turns");
   assert.ok(!body.transcript.some((m) => /Error:|<<END>>/i.test(m.content)), "no provider errors or control markers persisted");
-  assert.equal(body.turn_count, 5);
+  assert.equal(body.turn_count, 6);
 });
 
 await step("integrity events are recorded", async () => {

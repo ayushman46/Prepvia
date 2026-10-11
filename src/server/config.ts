@@ -100,6 +100,14 @@ export const config = {
     get realtimeTimeoutMs() {
       return float("LLM_REALTIME_TIMEOUT", 15) * 1000;
     },
+    /** A live provider that hasn't started streaming by now is abandoned (the turn moves on). */
+    get realtimeFirstTokenTimeoutMs() {
+      return float("LLM_REALTIME_FIRST_TOKEN_TIMEOUT", 6) * 1000;
+    },
+    /** Live turns whose providers all failed within this window get one more round. */
+    get realtimeRetryWindowMs() {
+      return float("LLM_REALTIME_RETRY_WINDOW", 8) * 1000;
+    },
     get analysisTimeoutMs() {
       return float("LLM_ANALYSIS_TIMEOUT", 45) * 1000;
     },

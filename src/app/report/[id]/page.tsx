@@ -56,6 +56,7 @@ function ScoreRing({ score }: { score: number }) {
 async function pollReport(sessionId: string, signal: AbortSignal, onSlow: () => void): Promise<PageState | null> {
   const startedAt = Date.now();
   let slowNotified = false;
+  let retriedFailure = false;
   while (!signal.aborted) {
     try {
       const report = await getReport(sessionId, signal);
@@ -68,6 +69,12 @@ async function pollReport(sessionId: string, signal: AbortSignal, onSlow: () => 
       if (signal.aborted) return null;
       const apiError = error instanceof ClientApiError ? error : null;
       if (apiError?.code === "not_enough_content") return { kind: "empty", message: apiError.message };
+      // A failed generation (usually a malformed model response) is retried once automatically.
+      if (apiError?.code === "report_failed" && !retriedFailure) {
+        retriedFailure = true;
+        await new Promise((resolve) => setTimeout(resolve, POLL_MS));
+        continue;
+      }
       return { kind: "error", message: apiError?.message ?? "Couldn't load the report.", retryable: apiError?.status !== 404 };
     }
     await new Promise((resolve) => setTimeout(resolve, POLL_MS));

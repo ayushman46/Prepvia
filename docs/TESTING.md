@@ -8,15 +8,15 @@ This document records every test suite, benchmark, and measurement taken while r
 
 | Suite | What runs for real | Result |
 |---|---|---|
-| Unit tests (`npm test`) | Pure logic + orchestration with mocked I/O | **109 / 109 pass** |
-| API end-to-end (`npm run test:e2e`) | Production server, MongoDB Atlas, Microsoft Edge TTS; LLM/STT simulated | **28 / 28 pass** |
-| Live browser (`npm run test:live-browser`) | Chromium, Silero VAD, NVIDIA LLM, Edge TTS, MongoDB, Web Audio playback (STT simulated) | **18 / 18 pass** (conversation 12/12 re-run on the final build) |
+| Unit tests (`npm test`) | Pure logic + orchestration with mocked I/O | **133 / 133 pass** |
+| API end-to-end (`npm run test:e2e`) | Production server, MongoDB Atlas, Microsoft Edge TTS; LLM/STT simulated | **29 / 29 pass** |
+| Live browser (`npm run test:live-browser`) | Chromium, Silero VAD, NVIDIA LLM, Edge TTS, MongoDB, Web Audio playback (STT simulated) | **19 / 19 pass** on the final build (earlier runs today: 18/19 during an NVIDIA incident, and 17/19 twice from bugs 36 and 37, both fixed) |
 | Load (`tests/load/run.mjs`) | 30 concurrent candidates with real Edge TTS; 50 without TTS | **0 errors, 0 5xx, consistent data** |
-| Interview quality (`npm run test:quality`) | 5 LLM-simulated candidate personas vs the real interviewer, LLM judge | See [§6](#6-interview-quality-evaluation) |
+| Interview quality (`npm run test:quality`) | 5 LLM-simulated candidate personas vs the real interviewer, LLM judge | **4.86 / 5** mean judge score; strong vs vague candidate reports 88 vs 40 ([§6](#6-interview-quality-evaluation)) |
 | Edge TTS live (`npm run test:live`) | Real Edge TTS socket pool | **4 / 4 pass** |
 | Lint · typecheck · `npm audit --omit=dev` | — | **clean · clean · 0 vulnerabilities** |
 
-**Headline latency (real browser, final build):** candidate stops talking → interviewer audible in **1.83–2.18 s** (includes the fixed 800 ms end-of-speech silence window) · greeting audible **188 ms** after pressing Start · barge-in silences the interviewer **367 ms** after the candidate starts talking.
+**Headline latency (real browser, final build, 3 runs):** candidate stops talking → interviewer audible in **1.68–2.27 s, median 2.08 s** over 9 voice turns (includes the fixed 800 ms end-of-speech silence window) · greeting audible **175–199 ms** after pressing Start · barge-in silences the interviewer **383–462 ms** after the candidate starts talking.
 
 ## Test environment
 
@@ -37,13 +37,13 @@ This document records every test suite, benchmark, and measurement taken while r
 
 | Turn | End of speech → interviewer audible | LLM first token* | First sentence released* | First audio ready* | Caption visible when audio starts |
 |---|---|---|---|---|---|
-| Opening (prefetched in lobby) | **188 ms** after Start | — | — | — | — |
-| Voice answer 1 | **1,828 ms** | 657 ms | 689 ms | 926 ms | "Okay." |
-| Voice answer 2 | **2,088 ms** | 597 ms | 775 ms | 1,070 ms | "Got it." |
-| Voice answer 3 ("I don't know") | **2,180 ms** | 867 ms | 934 ms | 1,255 ms | "No problem." |
-| Barge-in (talk → interviewer silent) | **367 ms** | — | — | — | — |
+| Opening (prefetched in lobby) | **175 ms** after Start | — | — | — | — |
+| Voice answer 1 | **2,240 ms** | 576 ms | 669 ms | 1,149 ms | "Okay, that gives good context." |
+| Voice answer 2 | **1,874 ms** | 481 ms | 554 ms | 874 ms | "Thanks for explaining the outbox pattern and idempotency." |
+| Voice answer 3 ("I don't know") | **2,178 ms** | 833 ms | 968 ms | 1,282 ms | "No problem—that's a nuanced topic." |
+| Barge-in (talk → interviewer silent) | **462 ms** | — | — | — | — |
 
-\* server-side, measured from the moment the turn request arrived. Every voice number includes the fixed **800 ms** silence window the VAD uses to decide the candidate has finished; speculative STT ran inside that window on 3/3 turns. Captions were verified to be synchronized: when the first audio started, only the first sentence was visible.
+\* server-side, measured from the moment the turn request arrived. Every voice number includes the fixed **800 ms** silence window the VAD uses to decide the candidate has finished; speculative STT ran inside that window on 3/3 turns. Captions were verified to be synchronized: when the first audio started, only the first sentence was visible. This is the 19/19 run; the two other runs on the same latency path measured voice turns of 1,882 / 2,080 / 2,082 ms and 1,899 / 2,271 / 1,684 ms, greetings of 179 and 199 ms, and a 383 ms barge-in.
 
 ### Progression across optimizations (same scenario)
 
@@ -54,7 +54,8 @@ This document records every test suite, benchmark, and measurement taken while r
 | + sliding-window barge-in, speculative TTS during the repeat check | p50 2,110 ms (1,748–2,122) | 472 ms | 492 ms |
 | + "speaking" outranks "processing" in the UI state | p50 1,924 ms (1,618–2,054) | 464 ms | 267 ms |
 | + TTS socket recycling at 25 s and TTS hedging (fixed a 7.3 s TTS outlier) | 1,674 ms best (one 4.2 s LLM-side outlier) | 365 ms | 175 ms |
-| **+ acknowledgements released immediately (final)** | **1,828–2,180 ms** | **367 ms** | **188 ms** |
+| + acknowledgements released immediately | 1,828–2,180 ms | 367 ms | 188 ms |
+| **Final build (closing, pacing and resilience fixes; 3 runs)** | **1,684–2,271 ms, median 2,080 ms** | **383–462 ms** | **175–199 ms** |
 
 Run-to-run variation is dominated by NVIDIA's time-to-first-token (450–870 ms across runs).
 
@@ -97,6 +98,7 @@ Super was both faster and gave sharper, more specific follow-ups, so it replaced
 - Observed free-tier queueing spikes of **7.0 s and 12.5 s** to first token on single requests, which is why live turns are **hedged**: after 800 ms without a token, a second request races on Lightning (an independent queue).
 - Concurrency is not serialized per account: Lightning answered in 320 ms *while* a long Super reasoning request ran; 4 parallel Lightning requests answered in 377–411 ms.
 - **Rate-limit probe:** 30 Super + 30 Lightning requests in 15 s → **60 / 60 succeeded**; 30 more Super requests immediately after → **10 succeeded, 20 returned HTTP 429**. Conclusion: the free tier allows **~40 requests/minute per model** (not per account). Per-answer background analysis therefore runs on Lightning, leaving Super's budget for live turns.
+- **Incident seen during final testing (2026-10-11, about 15:38 IST, a few minutes):** Super answered HTTP 429 to back-to-back requests while Lightning accepted requests but never responded (30 s timeouts). One live turn failed after the 15 s stall timeout. Live turns now abandon a provider that hasn't started streaming within 6 s and retry once when every provider failed quickly ([bug 35](#7-bugs-found-by-testing-all-fixed)); the API e2e suite covers a brief outage of every provider being absorbed.
 
 ---
 
@@ -128,7 +130,8 @@ Simulated LLM (350 ms) and STT (400 ms); real MongoDB; per-candidate client IPs;
 | Scenario | Turns | Throughput | First audio p50 / p95 / p99 | Turn total p50 / p95 | Errors | Integrity |
 |---|---|---|---|---|---|---|
 | 20 candidates × 6 turns, real TTS | 140 | 7.6 turns/s | 1,246 / 1,755 / 1,913 ms | 1,756 / 2,399 ms | 0 | ✓ |
-| **30 candidates × 6 turns, real TTS (final)** | 210 | 11.8 turns/s | **1,166 / 2,018 / 2,092 ms** | 1,620 / 2,309 ms | 0 (420 audio clips, 0 fallbacks) | ✓ |
+| 30 candidates × 6 turns, real TTS | 210 | 11.8 turns/s | 1,166 / 2,018 / 2,092 ms | 1,620 / 2,309 ms | 0 (420 audio clips, 0 fallbacks) | ✓ |
+| **30 candidates × 6 turns, real TTS (final build)** | 210 | 11.5 turns/s | **1,059 / 2,099 / 2,157 ms** | 1,602 / 2,414 ms | 0 (420 audio clips, 0 fallbacks) | ✓ |
 | 50 candidates × 8 turns, TTS off (before DB consolidation) | 450 | 8.0 turns/s | — (first sentence p50 2,714 ms) | 5,206 / 5,665 ms | 0 | ✓ |
 | 50 candidates × 8 turns, TTS off (after DB consolidation) | 450 | **11.5 turns/s** | — (first sentence p50 2,043 ms) | 3,307 / 3,761 ms | 0 | ✓ |
 
@@ -155,7 +158,12 @@ Every interviewer turn is checked deterministically (one question per turn, leng
 | 1 | first evaluator run | 4 | 4 | 4 | 4 | 4 | **4.00 / 5** (4 of 5 reports broken) |
 | 2 | report parser fixed, praise/question rules | 4.7 | judge rate-limited | 3 | **5** | **5** | **4.42 / 5** |
 | 3 | canvas hidden until introduced, regeneration ×2, notes on separate model | **5** (every dimension) | — | — | — | — | run interrupted by a harness bug (fixed) |
-| Final | this build | in progress | | | | | results appended in a follow-up commit |
+| 4 | full run after round 3 | 4.5 | 3 | 4 | 5 | 3.5 | **4.00 / 5** · calibration 82 vs 45 |
+| 5 | end requests, early wrap-up guard, full question history | 4.9 | 5 | 5 | 4 | 5 | **4.78 / 5** · calibration 88 vs 22 |
+| 6 | report canvas grounding, last regeneration without the copied dialogue | 5 | 4 | 5 | 4.9 | judge failed (NVIDIA) | **4.72 / 5** over 4 · calibration 88 vs 30 |
+| **Final** | **this build** (closing guarantee, farewell/empty-reply guards, company grounding, report repair) | **5** | **5** | **5** | 4.3 | **5** | **4.86 / 5** · calibration 88 vs 40 |
+
+Candidates are simulated by LLMs, so a persona's score can move by about half a point between runs of the same build; read the rounds as a trend, not exact deltas.
 
 Deterministic checks across rounds: filler-praise openers **22 % → 0 %**; stacked questions **2 / 12 → 0** per interview (now enforced); broken reports **4 / 5 → 0 / 5**; scripted edge-case probes (repeat, "I don't know", prompt injection, off-topic, wanting to stop) all handled.
 
@@ -165,6 +173,10 @@ Deterministic checks across rounds: filler-praise openers **22 % → 0 %**; stac
 - **Round 1 (mean judge 4.0 / 5):** 4 of 5 reports were broken (see bug 5); long turns (up to 108 words) and stacked questions; the interviewer read a coding task aloud before the canvas existed; closing exchanges looped ("Take care." ×4).
 - **Round 2 (mean 4.42 / 5; strong 4.7, pm 5, behavioral 5, edge 3):** reports fixed (85 / 45 / 78 / 82); filler praise 22 % → 0 %; stacked questions → 0. Found verbatim copies of earlier replies under rate-limit failover and NVIDIA's per-model rate limit.
 - **Round 3 (strong persona):** judge **5 / 5 in every dimension**, report 85, 0 regenerations, 0 % backup-model turns. (The run was then interrupted by a harness bug, fixed by moving the simulated candidate to separate models.)
+- **Round 4 (mean 4.00):** repetition with weak answers: the vague persona was asked the same question again and again (judge: the for-loop question at turns 8–10, 26–28 and 38–40), the interviewer carried on after the candidate asked to end, and the behavioral interview fell into an "end the interview" loop. Fixed by explicit end requests (bug 24), the early wrap-up guard (bug 22) and listing every question asked (bug 30).
+- **Round 5 (mean 4.78; strong 4.9, vague 5, edge 5, pm 4, behavioral 5):** calibration widened to 88 vs 22. The pm interview still had verbatim repeats accepted after two regenerations, and a report credited canvas code that wasn't written. Fixed by the last-attempt regeneration without the copied dialogue (bug 29) and canvas grounding in the rubric (bug 33).
+- **Round 6 (mean 4.72 over 4 judged; strong 5, vague 4, edge 5, pm 4.9):** repeated questions fell from 10+ per weak interview to at most 1. Still found: a goodbye exchange in the middle of the behavioral interview, started by the candidate, plus an invented answer about the company (bugs 23, 31); a closing turn with nothing speakable (bug 27); a report naming `SELECT FOR UPDATE` that wasn't in the canvas (bug 33); the interviewer offering to run code (bug 32). The Mac went to sleep for 90 minutes mid-run (during the edge persona's report step), and NVIDIA was degraded after it woke (see the incident in [§2](#2-llm-benchmarks-nvidia-free-tier)): the pm interview ran so slowly that its first answer arrived in the behavioral section, and the behavioral judge call failed. Round 6 is indicative only.
+- **Final (mean 4.86; strong, vague, edge and behavioral 5 in every dimension, pm 4.3):** report accuracy 5 / 5 in all five interviews; no stacked questions; filler praise on 1 turn in total; every interview closed itself (the vague one through the time limit, the edge one on the candidate's explicit end request). Remaining gap: the repeat and early wrap-up guards only inspect the opening of a reply (about 50 characters), so the pm interviewer re-asked one question after a different preamble (judge adaptivity 3), and one behavioral reply ended a section with "That's all the time we have for this section. You can now press End interview" in its third sentence, after which the candidate ended the interview early.
 
 ---
 
@@ -193,6 +205,22 @@ Deterministic checks across rounds: filler-praise openers **22 % → 0 %**; stac
 | 19 | rate-limit probe | One NVIDIA model's 40 req/min shared by live turns and background work | Background notes on a separate model; analysis sampled; 429 backoff for background calls |
 | 20 | `npm audit` | Next.js 14.2 had 23 advisories (1 critical) | Upgraded to Next.js 16.4 / React 19 (0 vulnerabilities) |
 | 21 | production build | Tailwind opacity modifiers (`text-vast/70`, …) silently generated no CSS | Theme colors as hex values |
+| 22 | quality eval | Interviewer started wrapping up mid-interview ("we've reached the end of this section, press End interview") | Wrap-up language before the wrap-up section is rejected and regenerated with the minutes remaining |
+| 23 | quality eval | Goodbye exchanges mid-interview ("Take care." / "Have a great day.") after a candidate said thanks | Farewells added to the same guard |
+| 24 | quality eval | "End the interview" was treated as an answer and the interview carried on | Explicit end requests close the interview at once, including "I'm ending the interview now" |
+| 25 | code review | A technical answer such as "we end the session on logout" would have ended the interview | "Session" only counts as "this/our session" or as the whole message |
+| 26 | live browser | When time ran out mid-exercise, the closing turn asked a question and the interview ended with it unanswered | The final turn never asks a question; a fixed closing line is spoken if the model asks one, says nothing, or fails |
+| 27 | quality eval | A closing turn with nothing speakable (only the end marker) failed with an error and left the interview open | Same closing guarantee; the end marker only counts from wrap-up on and never right after a question |
+| 28 | quality eval | An empty reply mid-interview failed the turn | Empty drafts are regenerated with a note |
+| 29 | quality eval | A verbatim copy of the previous reply survived two regenerations | The last regeneration sees only the candidate's latest message and a short excerpt of the rejected draft |
+| 30 | quality eval | Long interviews re-asked early questions (only the last 10 questions were in the prompt) | Every question asked so far is listed (each clipped to 220 characters) |
+| 31 | quality eval | Interviewer invented company practices when the candidate asked about the team | Answers only from the job description and says when it doesn't know |
+| 32 | quality eval | Interviewer offered to "run" the candidate's code | It is told it can read the canvas but cannot execute code |
+| 33 | quality eval | Report credited code the candidate never wrote ("uses SELECT FOR UPDATE") | Rubric names only constructs literally present in the canvas; spoken ideas count as reasoning, not implementation |
+| 34 | live browser | Leaving the tab just before the interview ended lost the signal | Recorded when tracking stops while the tab is hidden |
+| 35 | live browser | During an NVIDIA incident (Super returning 429, Lightning not responding) a turn waited 15 s and then failed | A live provider that hasn't started streaming within 6 s is abandoned, and a turn whose providers all failed quickly is retried once |
+| 36 | live browser + report probe | About 1 in 6 scorecards generated without reasoning had malformed JSON (for example `;` between array items); when both server attempts failed, the report page showed an error | JSON repair now handles stray semicolons, missing commas and unescaped quotations (every probe output parses); the report page retries a failed generation once automatically |
+| 37 | live browser | A barge-in during the interviewer's last sentence wasn't marked "interrupted" in the transcript (only cuts before a later sentence started were) | Any barge-in marks the reply as interrupted |
 
 ---
 

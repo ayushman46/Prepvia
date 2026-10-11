@@ -62,6 +62,13 @@ export function useIntegrity(sessionId: string, active: boolean) {
       window.removeEventListener("focus", onFocus);
       window.removeEventListener("pagehide", onPageHide);
       clearInterval(timer);
+      // The interview ended while the candidate was on another tab: record the
+      // time away so far, since the "visible" event will no longer be handled.
+      if (hiddenAt.current) {
+        const seconds = Math.round((Date.now() - hiddenAt.current) / 1000);
+        hiddenAt.current = null;
+        if (seconds >= 1) record("tab_hidden", `${seconds}s`);
+      }
       flush();
     };
   }, [active, flush, record, sessionId]);

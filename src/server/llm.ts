@@ -102,10 +102,12 @@ async function* streamFromProvider(
 ): AsyncGenerator<string> {
   const analysis = purpose === "analysis";
   const timeoutMs = analysis ? config.llm.analysisTimeoutMs : config.llm.realtimeTimeoutMs;
+  // A live turn can't wait long for a queued request to start streaming.
+  const firstChunkMs = purpose === "realtime" ? Math.min(timeoutMs, config.llm.realtimeFirstTokenTimeoutMs) : timeoutMs;
   const controller = new AbortController();
   // Idle timer: reset on every received chunk so slow-but-alive streams continue,
   // while a stalled provider fails fast and the next provider can take over.
-  let timer = setTimeout(() => controller.abort(new LlmError(`${provider.name} timed out`)), timeoutMs);
+  let timer = setTimeout(() => controller.abort(new LlmError(`${provider.name} timed out`)), firstChunkMs);
   const onExternalAbort = () => controller.abort(new LlmError(`${provider.name} cancelled`, false));
   if (options.signal?.aborted) onExternalAbort();
   options.signal?.addEventListener("abort", onExternalAbort, { once: true });
@@ -263,38 +265,51 @@ export async function* streamCompletion(
     throw new LlmError("No language model provider is configured. Set NVIDIA_API_KEY or GROQ_API_KEY.", false);
   }
 
+  const startedAt = Date.now();
   let lastError: unknown;
-  for (let index = 0; index < providers.length; index++) {
-    const provider = providers[index];
-    // Hedge against the next provider when there is one, otherwise against a
-    // second request to the same provider (often served by another replica).
-    const hedgeProvider = providers[index + 1] ?? provider;
-    const stream =
-      purpose === "realtime"
-        ? hedgedStream(
-            (signal) => streamFromProvider(provider, messages, purpose, { ...options, signal }),
-            (signal) => streamFromProvider(hedgeProvider, messages, purpose, { ...options, signal }),
-            hedgeDelayMs(),
-            (winner) => {
-              const served = winner === "primary" ? provider : hedgeProvider;
-              options.onServed?.(served.name, served.model);
-            },
-          )
-        : streamFromProvider(provider, messages, purpose, options);
-    if (purpose !== "realtime") options.onServed?.(provider.name, provider.model);
-    let yielded = false;
-    try {
-      for await (const chunk of stream) {
-        yielded = true;
-        yield chunk;
-      }
-      if (yielded) return;
-      lastError = new LlmError(`${provider.name} returned an empty response`);
-    } catch (error) {
-      if (yielded) throw error;
-      lastError = error;
+  // Live turns get a second round when every provider failed quickly and retryably
+  // (for example a burst 429 on the primary while the backup stalls), so the
+  // candidate hears a reply a few seconds late instead of an error.
+  for (let round = 0; round < (purpose === "realtime" ? 2 : 1); round++) {
+    if (round > 0) {
+      const retryable = lastError instanceof LlmError && lastError.retryable;
+      if (!retryable || Date.now() - startedAt >= config.llm.realtimeRetryWindowMs) break;
+      const waitMs = Math.min(2_000, (lastError as LlmError).retryAfterMs ?? 500);
+      logger.warn("All LLM providers failed; retrying the live turn once", lastError, { waitMs });
+      await new Promise((resolve) => setTimeout(resolve, waitMs));
     }
-    logger.warn("LLM provider failed; trying next provider", lastError, { provider: provider.name, purpose });
+    for (let index = 0; index < providers.length; index++) {
+      const provider = providers[index];
+      // Hedge against the next provider when there is one, otherwise against a
+      // second request to the same provider (often served by another replica).
+      const hedgeProvider = providers[index + 1] ?? provider;
+      const stream =
+        purpose === "realtime"
+          ? hedgedStream(
+              (signal) => streamFromProvider(provider, messages, purpose, { ...options, signal }),
+              (signal) => streamFromProvider(hedgeProvider, messages, purpose, { ...options, signal }),
+              hedgeDelayMs(),
+              (winner) => {
+                const served = winner === "primary" ? provider : hedgeProvider;
+                options.onServed?.(served.name, served.model);
+              },
+            )
+          : streamFromProvider(provider, messages, purpose, options);
+      if (purpose !== "realtime") options.onServed?.(provider.name, provider.model);
+      let yielded = false;
+      try {
+        for await (const chunk of stream) {
+          yielded = true;
+          yield chunk;
+        }
+        if (yielded) return;
+        lastError = new LlmError(`${provider.name} returned an empty response`);
+      } catch (error) {
+        if (yielded) throw error;
+        lastError = error;
+      }
+      logger.warn("LLM provider failed; trying next provider", lastError, { provider: provider.name, purpose });
+    }
   }
   throw lastError instanceof LlmError ? lastError : new LlmError("All language model providers failed.");
 }
