@@ -120,6 +120,16 @@ const lastAiText = (page) => page.getByTestId("msg-ai").last().innerText().catch
 const metrics = (page) => page.evaluate(() => window.__interviewMetrics ?? []);
 const playAnswer = (page, wav) => page.evaluate((b64) => window.__fakeMic.play(b64), wav);
 
+/**
+ * Match a spoken answer's bubble whether the transcript comes from the stub (exact
+ * text) or real Whisper (its own punctuation and casing): words 3-8, in order.
+ */
+function spoken(text) {
+  const words = text.toLowerCase().match(/[a-z0-9']+/g) ?? [];
+  const picked = words.length > 6 ? words.slice(2, 8) : words;
+  return new RegExp(picked.map((w) => w.replace(/'/g, "'?")).join("[^a-z0-9]+"), "i");
+}
+
 /** Sample the orb's live level while the interviewer speaks (proves audio flows through the analyser). */
 async function sampleOrbLevel(page, ms = 1200) {
   let max = 0;
@@ -141,7 +151,7 @@ async function answerByVoice(page, label, text, wav) {
   const startsBefore = (await appAudioStarts(page)).length;
   const aiBefore = await page.getByTestId("msg-ai").count();
   const speechEndedAt = await playAnswer(page, wav);
-  await page.getByTestId("msg-user").filter({ hasText: text.slice(0, 32) }).last().waitFor({ timeout: 25_000 });
+  await page.getByTestId("msg-user").filter({ hasText: spoken(text) }).last().waitFor({ timeout: 25_000 });
   const firstAudio = await waitUntil(
     async () => (await appAudioStarts(page)).slice(startsBefore).find((s) => s.t > speechEndedAt),
     { timeout: 40_000, interval: 25, message: `interviewer audio after ${label}` },
@@ -285,7 +295,7 @@ async function scenarioConversation(browser, fixtures) {
     assert.ok(stopMs !== null, "interviewer audio source was stopped");
     latencyRows.push({ label: "barge-in (talk → interviewer silent)", speech_end_to_audio_ms: stopMs });
     await page.locator('[data-testid="msg-ai"][data-interrupted="true"]').first().waitFor({ timeout: 6_000 });
-    await page.getByTestId("msg-user").filter({ hasText: fixtures.barge.text.slice(0, 25) }).last().waitFor({ timeout: 30_000 });
+    await page.getByTestId("msg-user").filter({ hasText: spoken(fixtures.barge.text) }).last().waitFor({ timeout: 30_000 });
     // No stale audio from the interrupted turn may resume afterwards.
     const afterBarge = (await appAudioStarts(page)).slice(startsAtBarge);
     await waitForStatus(page, /Your turn/, 120_000);
@@ -326,7 +336,7 @@ async function scenarioConversation(browser, fixtures) {
     await waitForStatus(page, /Recording/, 3_000);
     await playAnswer(page, fixtures.ptt.wav);
     await page.keyboard.up("Space");
-    await page.getByTestId("msg-user").filter({ hasText: fixtures.ptt.text.slice(0, 24) }).last().waitFor({ timeout: 20_000 });
+    await page.getByTestId("msg-user").filter({ hasText: spoken(fixtures.ptt.text) }).last().waitFor({ timeout: 20_000 });
     await waitForStatus(page, /Your turn/, 120_000);
     const reply = await lastAiText(page);
     await page.getByTestId("capture-mode").click(); // back to hands-free for the rest of the run
@@ -342,7 +352,7 @@ async function scenarioConversation(browser, fixtures) {
     await waitForStatus(page, /speak naturally/, 5_000);
     await setTranscript(fixtures.recover.text);
     await playAnswer(page, fixtures.recover.wav);
-    await page.getByTestId("msg-user").filter({ hasText: fixtures.recover.text.slice(0, 24) }).last().waitFor({ timeout: 20_000 });
+    await page.getByTestId("msg-user").filter({ hasText: spoken(fixtures.recover.text) }).last().waitFor({ timeout: 20_000 });
     await waitForStatus(page, /Your turn/, 120_000);
     return "capture reopened on a new stream and the next spoken answer went through";
   });
@@ -529,8 +539,8 @@ const fixtures = {
     wav: speak(dir, "ptt", "I would alert on consumer lag and page the on call engineer if it keeps growing for five minutes."),
   },
   recover: {
-    text: "After an incident we wrote a short postmortem and added a load test for the hot path.",
-    wav: speak(dir, "recover", "After an incident we wrote a short postmortem and added a load test for the hot path."),
+    text: "After an incident we wrote a short report and added a load test for the hot path.",
+    wav: speak(dir, "recover", "After an incident we wrote a short report and added a load test for the hot path."),
   },
   pdfPath: join(dir, "resume.pdf"),
 };
@@ -645,7 +655,7 @@ console.table(
 if (voiceRows.length) {
   const e2e = voiceRows.map((r) => r.speech_end_to_audio_ms);
   console.log(
-    `voice turns: p50 ${percentile(e2e, 0.5)}ms, max ${Math.max(...e2e)}ms, speculative STT used on ${voiceRows.filter((r) => r.speculative_stt).length}/${voiceRows.length} (includes the 800 ms end-of-speech silence window; * STT simulated at ${STT_DELAY_MS} ms)`,
+    `voice turns: p50 ${percentile(e2e, 0.5)}ms, max ${Math.max(...e2e)}ms, speculative STT used on ${voiceRows.filter((r) => r.speculative_stt).length}/${voiceRows.length} (includes the 800 ms end-of-speech silence window; ${process.env.GROQ_API_KEY_LIVE ? "real Groq Whisper STT" : `* STT simulated at ${STT_DELAY_MS} ms`})`,
   );
 }
 const errorLines = serverLogs.join("").split("\n").filter((l) => /"level":"error"/.test(l));

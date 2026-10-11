@@ -84,6 +84,18 @@ Run-to-run variation is dominated by NVIDIA's time-to-first-token (450–870 ms 
 
 Speech that only *resembles* the candidate's (loud voices next to the laptop) can't be told apart acoustically; push-to-talk is the answer there, and the room suggests it after repeated background-noise events.
 
+**With real Groq Whisper** (after the key was replaced):
+
+| Check | Result |
+|---|---|
+| `/api/health` | `"status": "ok"`, `"stt": "configured"` (the key is verified with Groq) |
+| Real microphone, hands-free, two spoken answers | both transcribed word for word ("…to a Go service on Kafka, and we cut latency by 80%."); 1 transcription each; 0 requests from 10 s of room sound |
+| Real microphone, push-to-talk | both answers transcribed correctly |
+| Speculative transcript ready | ~840 ms after the speech ended, i.e. ~40 ms after the 800 ms end-of-speech window: STT stays hidden in the pause |
+| Browser suite with real Groq (`GROQ_API_KEY_LIVE`) | conversation 14 / 14, canvas 7 / 7; voice turns 1,683–1,833 ms end to end (median 1,719–1,765 ms over two runs), the same as with simulated STT |
+
+One harness fix came out of this: the suite now matches spoken answers by words rather than exact text, since Whisper writes its own punctuation and spellings ("post-mortem" for "postmortem").
+
 ---
 
 ## 2. LLM benchmarks (NVIDIA free tier)
@@ -280,7 +292,7 @@ Deterministic checks across rounds: filler-praise openers **22 % → 0 %**; stac
 
 ## 9. Known limitations
 
-- **Real speech-to-text is untested here.** The local Groq key was rejected, so live tests simulate STT (450 ms). Set a valid `GROQ_API_KEY` and re-run `npm run test:live-browser` with `GROQ_API_KEY_LIVE` set, and `npm run test:real-mic`, to verify.
+- **Real speech-to-text was tested late.** Most latency tables above simulate STT (450 ms) because the first Groq key was invalid. With a valid key, real Groq Whisper was verified on the real microphone and in the browser suite (see [real microphone](#real-microphone-live-voice-input)): transcripts were exact and end-to-end voice turns were unchanged.
 - **Not measured from Vercel.** All latency numbers are from a local production build talking to Atlas (Mumbai), NVIDIA, and Edge TTS from India.
 - **Real microphone tested on one Mac only.** The built-in microphone and speakers of one MacBook Air, in Chromium and Brave. Windows, Safari, Firefox, phones and Bluetooth headsets are untested; the device-change and error handling are exercised by the fake-microphone suite.
 - **Quality is LLM-judged**, not rated by humans; the simulated candidates are approximations.

@@ -120,7 +120,7 @@ Serverless functions can't hold a 20-minute WebSocket open (Vercel's beta WebSoc
 | First clause spoken early; sentences synthesized concurrently, played strictly in order | Audio starts on the first clause |
 | Database round trips in parallel; per-turn writes collapsed into one | Low latency and ~44% more throughput on the free cluster |
 
-Measured end to end in a real Chromium browser (real VAD, NVIDIA, Edge TTS, MongoDB; STT simulated at 450 ms because no Groq key was available locally): **candidate stops talking → interviewer audible in 1.6-2.3 s (median 1.88 s)**, *including* the 800 ms silence window that decides the candidate has finished. Barge-in silences the interviewer **~0.4 s** after the candidate starts talking. Full methodology, every benchmark, load and quality results: **[docs/TESTING.md](docs/TESTING.md)**.
+Measured end to end in a real Chromium browser (real VAD, NVIDIA, Edge TTS, MongoDB; STT simulated at 450 ms, and re-checked with real Groq Whisper at the same 1.7-1.8 s): **candidate stops talking → interviewer audible in 1.6-2.3 s (median 1.88 s)**, *including* the 800 ms silence window that decides the candidate has finished. Barge-in silences the interviewer **~0.4 s** after the candidate starts talking. Full methodology, every benchmark, load and quality results: **[docs/TESTING.md](docs/TESTING.md)**.
 
 ### Interview quality guards
 
@@ -223,7 +223,8 @@ Latest results on this codebase (details, methodology and every metric in **[doc
 | Unit | 161 / 161 |
 | API end-to-end | 29 / 29 |
 | Live browser (real Chromium, VAD, NVIDIA, Edge TTS, MongoDB) | 21 / 21 · voice turn 1.6-2.3 s end to end (median 1.88 s over 5 runs) · greeting 175-308 ms · barge-in 366-469 ms |
-| Real microphone (MacBook Air, Chromium and Brave) | voice works under `next dev` and production; 0 requests from background sound; 1 transcription per answer; invalid key → typing after 1 request |
+| Real microphone (MacBook Air, Chromium and Brave) | voice works under `next dev` and production; real Groq transcripts word for word; 0 requests from background sound; 1 transcription per answer; invalid key → typing after 1 request |
+| Live browser with real Groq STT | conversation 14 / 14, canvas 7 / 7 · voice turn median 1.72-1.77 s |
 | Load | 30 concurrent candidates with real TTS: 210 turns, 0 errors, 420 clips, first audio p50 1.06 s · 50 concurrent: 450 turns, 0 errors, 11.5 turns/s |
 | Interview quality (LLM judge, 5 personas) | 4.78 / 5 mean on the final build (4.86 on the previous one); strong vs vague candidate reports 78 vs 28 |
 | Lint · typecheck · production audit | clean · clean · 0 vulnerabilities |
