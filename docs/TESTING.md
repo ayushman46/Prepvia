@@ -8,15 +8,15 @@ This document records every test suite, benchmark, and measurement taken while r
 
 | Suite | What runs for real | Result |
 |---|---|---|
-| Unit tests (`npm test`) | Pure logic + orchestration with mocked I/O | **133 / 133 pass** |
+| Unit tests (`npm test`) | Pure logic + orchestration with mocked I/O | **141 / 141 pass** |
 | API end-to-end (`npm run test:e2e`) | Production server, MongoDB Atlas, Microsoft Edge TTS; LLM/STT simulated | **29 / 29 pass** |
-| Live browser (`npm run test:live-browser`) | Chromium, Silero VAD, NVIDIA LLM, Edge TTS, MongoDB, Web Audio playback (STT simulated) | **19 / 19 pass** on the final build (earlier runs today: 18/19 during an NVIDIA incident, and 17/19 twice from bugs 36 and 37, both fixed) |
+| Live browser (`npm run test:live-browser`) | Chromium, Silero VAD, NVIDIA LLM, Edge TTS, MongoDB, Web Audio playback (STT simulated) | **19 / 19 pass** in each of the last 3 runs, the last on the final build (earlier runs today: 18/19 during an NVIDIA incident, and 17/19 twice from bugs 36 and 37, both fixed) |
 | Load (`tests/load/run.mjs`) | 30 concurrent candidates with real Edge TTS; 50 without TTS | **0 errors, 0 5xx, consistent data** |
-| Interview quality (`npm run test:quality`) | 5 LLM-simulated candidate personas vs the real interviewer, LLM judge | **4.86 / 5** mean judge score; strong vs vague candidate reports 88 vs 40 ([§6](#6-interview-quality-evaluation)) |
+| Interview quality (`npm run test:quality`) | 5 LLM-simulated candidate personas vs the real interviewer, LLM judge | **4.78 / 5** mean judge score on the final build (4.86 on the previous one); strong vs vague candidate reports 78 vs 28 ([§6](#6-interview-quality-evaluation)) |
 | Edge TTS live (`npm run test:live`) | Real Edge TTS socket pool | **4 / 4 pass** |
 | Lint · typecheck · `npm audit --omit=dev` | — | **clean · clean · 0 vulnerabilities** |
 
-**Headline latency (real browser, final build, 3 runs):** candidate stops talking → interviewer audible in **1.68–2.27 s, median 2.08 s** over 9 voice turns (includes the fixed 800 ms end-of-speech silence window) · greeting audible **175–199 ms** after pressing Start · barge-in silences the interviewer **383–462 ms** after the candidate starts talking.
+**Headline latency (real browser, 5 runs on the final latency path):** candidate stops talking → interviewer audible in **1.64–2.27 s, median 1.88 s** over 15 voice turns (includes the fixed 800 ms end-of-speech silence window) · greeting audible **175–308 ms** after pressing Start · barge-in silences the interviewer **366–469 ms** after the candidate starts talking.
 
 ## Test environment
 
@@ -37,13 +37,13 @@ This document records every test suite, benchmark, and measurement taken while r
 
 | Turn | End of speech → interviewer audible | LLM first token* | First sentence released* | First audio ready* | Caption visible when audio starts |
 |---|---|---|---|---|---|
-| Opening (prefetched in lobby) | **175 ms** after Start | — | — | — | — |
-| Voice answer 1 | **2,240 ms** | 576 ms | 669 ms | 1,149 ms | "Okay, that gives good context." |
-| Voice answer 2 | **1,874 ms** | 481 ms | 554 ms | 874 ms | "Thanks for explaining the outbox pattern and idempotency." |
-| Voice answer 3 ("I don't know") | **2,178 ms** | 833 ms | 968 ms | 1,282 ms | "No problem—that's a nuanced topic." |
-| Barge-in (talk → interviewer silent) | **462 ms** | — | — | — | — |
+| Opening (prefetched in lobby) | **271 ms** after Start | — | — | — | — |
+| Voice answer 1 | **1,920 ms** | 575 ms | 1,005 ms | 1,006 ms | "Thanks for that overview." |
+| Voice answer 2 | **1,792 ms** | 471 ms | 485 ms | 768 ms | "Okay." |
+| Voice answer 3 ("I don't know") | **1,763 ms** | 477 ms | 492 ms | 856 ms | "No problem." |
+| Barge-in (talk → interviewer silent) | **366 ms** | — | — | — | — |
 
-\* server-side, measured from the moment the turn request arrived. Every voice number includes the fixed **800 ms** silence window the VAD uses to decide the candidate has finished; speculative STT ran inside that window on 3/3 turns. Captions were verified to be synchronized: when the first audio started, only the first sentence was visible. This is the 19/19 run; the two other runs on the same latency path measured voice turns of 1,882 / 2,080 / 2,082 ms and 1,899 / 2,271 / 1,684 ms, greetings of 179 and 199 ms, and a 383 ms barge-in.
+\* server-side, measured from the moment the turn request arrived. Every voice number includes the fixed **800 ms** silence window the VAD uses to decide the candidate has finished; speculative STT ran inside that window on 3/3 turns. Captions were verified to be synchronized: when the first audio started, only the first sentence was visible. This is the last 19/19 run on the final build. The four other runs on the same latency path measured voice turns of 1,882 / 2,080 / 2,082, 1,899 / 2,271 / 1,684, 2,240 / 1,874 / 2,178 and 1,636 / 1,678 / 1,694 ms, greetings of 175–308 ms and barge-ins of 383–469 ms.
 
 ### Progression across optimizations (same scenario)
 
@@ -55,7 +55,7 @@ This document records every test suite, benchmark, and measurement taken while r
 | + "speaking" outranks "processing" in the UI state | p50 1,924 ms (1,618–2,054) | 464 ms | 267 ms |
 | + TTS socket recycling at 25 s and TTS hedging (fixed a 7.3 s TTS outlier) | 1,674 ms best (one 4.2 s LLM-side outlier) | 365 ms | 175 ms |
 | + acknowledgements released immediately | 1,828–2,180 ms | 367 ms | 188 ms |
-| **Final build (closing, pacing and resilience fixes; 3 runs)** | **1,684–2,271 ms, median 2,080 ms** | **383–462 ms** | **175–199 ms** |
+| **Final build (closing, pacing and resilience fixes; 5 runs)** | **1,636–2,271 ms, median 1,882 ms** | **366–469 ms** | **175–308 ms** |
 
 Run-to-run variation is dominated by NVIDIA's time-to-first-token (450–870 ms across runs).
 
@@ -161,7 +161,8 @@ Every interviewer turn is checked deterministically (one question per turn, leng
 | 4 | full run after round 3 | 4.5 | 3 | 4 | 5 | 3.5 | **4.00 / 5** · calibration 82 vs 45 |
 | 5 | end requests, early wrap-up guard, full question history | 4.9 | 5 | 5 | 4 | 5 | **4.78 / 5** · calibration 88 vs 22 |
 | 6 | report canvas grounding, last regeneration without the copied dialogue | 5 | 4 | 5 | 4.9 | judge failed (NVIDIA) | **4.72 / 5** over 4 · calibration 88 vs 30 |
-| **Final** | **this build** (closing guarantee, farewell/empty-reply guards, company grounding, report repair) | **5** | **5** | **5** | 4.3 | **5** | **4.86 / 5** · calibration 88 vs 40 |
+| 7 | closing guarantee, farewell/empty-reply guards, company grounding, report repair | 5 | 5 | 5 | 4.3 | 5 | **4.86 / 5** · calibration 88 vs 40 |
+| **Final** | **this build**: every sentence checked, repeats found anywhere in earlier replies | **5** | 4 | **5** | **4.9** | **5** | **4.78 / 5** · calibration 78 vs 28 |
 
 Candidates are simulated by LLMs, so a persona's score can move by about half a point between runs of the same build; read the rounds as a trend, not exact deltas.
 
@@ -176,7 +177,8 @@ Deterministic checks across rounds: filler-praise openers **22 % → 0 %**; stac
 - **Round 4 (mean 4.00):** repetition with weak answers: the vague persona was asked the same question again and again (judge: the for-loop question at turns 8–10, 26–28 and 38–40), the interviewer carried on after the candidate asked to end, and the behavioral interview fell into an "end the interview" loop. Fixed by explicit end requests (bug 24), the early wrap-up guard (bug 22) and listing every question asked (bug 30).
 - **Round 5 (mean 4.78; strong 4.9, vague 5, edge 5, pm 4, behavioral 5):** calibration widened to 88 vs 22. The pm interview still had verbatim repeats accepted after two regenerations, and a report credited canvas code that wasn't written. Fixed by the last-attempt regeneration without the copied dialogue (bug 29) and canvas grounding in the rubric (bug 33).
 - **Round 6 (mean 4.72 over 4 judged; strong 5, vague 4, edge 5, pm 4.9):** repeated questions fell from 10+ per weak interview to at most 1. Still found: a goodbye exchange in the middle of the behavioral interview, started by the candidate, plus an invented answer about the company (bugs 23, 31); a closing turn with nothing speakable (bug 27); a report naming `SELECT FOR UPDATE` that wasn't in the canvas (bug 33); the interviewer offering to run code (bug 32). The Mac went to sleep for 90 minutes mid-run (during the edge persona's report step), and NVIDIA was degraded after it woke (see the incident in [§2](#2-llm-benchmarks-nvidia-free-tier)): the pm interview ran so slowly that its first answer arrived in the behavioral section, and the behavioral judge call failed. Round 6 is indicative only.
-- **Final (mean 4.86; strong, vague, edge and behavioral 5 in every dimension, pm 4.3):** report accuracy 5 / 5 in all five interviews; no stacked questions; filler praise on 1 turn in total; every interview closed itself (the vague one through the time limit, the edge one on the candidate's explicit end request). Remaining gap: the repeat and early wrap-up guards only inspect the opening of a reply (about 50 characters), so the pm interviewer re-asked one question after a different preamble (judge adaptivity 3), and one behavioral reply ended a section with "That's all the time we have for this section. You can now press End interview" in its third sentence, after which the candidate ended the interview early.
+- **Round 7 (mean 4.86; strong, vague, edge and behavioral 5 in every dimension, pm 4.3):** report accuracy 5 / 5 in all five interviews; no stacked questions; filler praise on 1 turn in total; every interview closed itself (the vague one through the time limit, the edge one on the candidate's explicit end request). Remaining gap: the repeat and early wrap-up guards only inspect the opening of a reply (about 50 characters), so the pm interviewer re-asked one question after a different preamble (judge adaptivity 3), and one behavioral reply ended a section with "That's all the time we have for this section. You can now press End interview" in its third sentence, after which the candidate ended the interview early. Both fixed in the final build (bugs 38, 39).
+- **Final (mean 4.78; strong, edge and behavioral 5, pm 4.9, vague 4):** the two targeted problems are gone: the pm interview had no repeated questions (adaptivity 3 → 5) and the behavioral interview ran through its wrap-up instead of closing early. The mean moved within run-to-run noise because the vague persona scored 4 this time (5 in round 7): the judge wanted harder adjustment after repeated non-answers. The remaining repeat flags are last-attempt fallbacks, where the third draft is accepted rather than stalling: "Do you have any questions for me?" asked again in wrap-up after a non-answer, and "anything else you'd like to add?" asked twice after the simulated candidate started saying goodbye. This run used the build just before bug 40's fix (it only changes the first words of a regenerated draft and is unit-tested); the live-browser and e2e suites ran on the final build.
 
 ---
 
@@ -221,6 +223,9 @@ Deterministic checks across rounds: filler-praise openers **22 % → 0 %**; stac
 | 35 | live browser | During an NVIDIA incident (Super returning 429, Lightning not responding) a turn waited 15 s and then failed | A live provider that hasn't started streaming within 6 s is abandoned, and a turn whose providers all failed quickly is retried once |
 | 36 | live browser + report probe | About 1 in 6 scorecards generated without reasoning had malformed JSON (for example `;` between array items); when both server attempts failed, the report page showed an error | JSON repair now handles stray semicolons, missing commas and unescaped quotations (every probe output parses); the report page retries a failed generation once automatically |
 | 37 | live browser | A barge-in during the interviewer's last sentence wasn't marked "interrupted" in the transcript (only cuts before a later sentence started were) | Any barge-in marks the reply as interrupted |
+| 38 | quality eval (final) | The repeat check compared a new reply only with the *start* of earlier replies, so a question asked again after a different preamble got through (the pm interviewer asked one question three times) | New text is compared with every part of earlier replies, and each question in a reply is checked, not only the opening |
+| 39 | quality eval (final) | Only a reply's opening was checked, so "That's all the time we have for this section. You can now press End interview" in a third sentence was spoken, and the candidate ended the interview at minute 10 of 15 | Every sentence is checked before it is spoken; a later sentence that wraps up early or re-asks a question is dropped and the reply continues with a new question |
+| 40 | live browser | After a rejected draft whose acknowledgement was already spoken, the new draft could open with another one ("Okay. Okay, you're suggesting…") | A regenerated draft's leading acknowledgement is dropped when one was already spoken |
 
 ---
 

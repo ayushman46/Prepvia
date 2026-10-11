@@ -8,6 +8,7 @@ import {
   LIVE_MAX_RECENT_MESSAGES,
   LIVE_MAX_RESUME_CHARS,
   mergeAnswerAnalysis,
+  isRepeatOf,
   parseJsonObject,
   phaseForQuestion,
   repairJson,
@@ -144,6 +145,21 @@ describe("parseJsonObject", () => {
   it("returns null when there is no object", () => {
     expect(parseJsonObject("no json here")).toBeNull();
     expect(parseJsonObject("[1, 2]")).toBeNull();
+  });
+});
+
+describe("isRepeatOf", () => {
+  const earlier =
+    "Thanks for that detail. Okay, thank you for that example. We'll now shift to a different area: can you tell me about a time when you had to influence a decision without direct authority, and what approach you used to align stakeholders?";
+
+  it("catches a question asked again after a different preamble (seen in the quality eval)", () => {
+    const again = "We'll now shift to a different area: can you tell me about a time when you had to influence a decision without direct authority, and what approach you used to align stakeholders?";
+    expect(isRepeatOf(again, earlier)).toBe(true);
+  });
+
+  it("does not flag a different question that shares generic phrasing", () => {
+    expect(isRepeatOf("Can you tell me about a time when you disagreed with a teammate about a design?", earlier)).toBe(false);
+    expect(isRepeatOf("How did you decide which merchant problems to fix first when engineering time was tight?", earlier)).toBe(false);
   });
 });
 

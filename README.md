@@ -120,13 +120,13 @@ Serverless functions can't hold a 20-minute WebSocket open (Vercel's beta WebSoc
 | First clause spoken early; sentences synthesized concurrently, played strictly in order | Audio starts on the first clause |
 | Database round trips in parallel; per-turn writes collapsed into one | Low latency and ~44% more throughput on the free cluster |
 
-Measured end to end in a real Chromium browser (real VAD, NVIDIA, Edge TTS, MongoDB; STT simulated at 450 ms because no Groq key was available locally): **candidate stops talking → interviewer audible in 1.7-2.3 s (median 2.08 s)**, *including* the 800 ms silence window that decides the candidate has finished. Barge-in silences the interviewer **~0.4 s** after the candidate starts talking. Full methodology, every benchmark, load and quality results: **[docs/TESTING.md](docs/TESTING.md)**.
+Measured end to end in a real Chromium browser (real VAD, NVIDIA, Edge TTS, MongoDB; STT simulated at 450 ms because no Groq key was available locally): **candidate stops talking → interviewer audible in 1.6-2.3 s (median 1.88 s)**, *including* the 800 ms silence window that decides the candidate has finished. Barge-in silences the interviewer **~0.4 s** after the candidate starts talking. Full methodology, every benchmark, load and quality results: **[docs/TESTING.md](docs/TESTING.md)**.
 
 ### Interview quality guards
 
 - **One question per turn, enforced**: generation stops after the first sentence ending in a question mark (max 4 sentences).
-- **No repetition**: the opening of each reply is held back and compared with every earlier interviewer reply and the candidate's last message; a repeat or parroting is regenerated (up to twice) before anything is spoken, and the last attempt sees only the candidate's latest message so there is nothing left to copy. Held sentences are synthesized speculatively, so the check costs no latency.
-- **No early goodbyes**: wrap-up language or farewells ("take care", "have a great day") before the wrap-up section, and empty replies, are regenerated with the minutes remaining.
+- **No repetition**: the opening of each reply is held back and compared with every earlier interviewer reply (anywhere in it, so a question re-asked after a different preamble counts) and with the candidate's last message; a repeat or parroting is regenerated (up to twice) before anything is spoken, and the last attempt sees only the candidate's latest message so there is nothing left to copy. Each later question is checked the same way before it is spoken. Held sentences are synthesized speculatively, so the check costs no latency.
+- **No early goodbyes**: wrap-up language or farewells ("take care", "have a great day") before the wrap-up section, and empty replies, are regenerated with the minutes remaining. Every sentence is checked before it is spoken: a later sentence that wraps up early or re-asks a question is dropped, and the model continues the reply with a new question.
 - **Clean endings**: an explicit "end the interview" closes it at once; the final turn never asks a question (a fixed closing line is spoken if the model asks one, says nothing, or fails); the end marker counts only from wrap-up on and never right after a question; a farewell without a question in wrap-up ends the interview even if the model forgets the marker.
 - **Deterministic edge cases**: "repeat the question" restates the exact question (and isn't scored); speaker echo (the interviewer's own words picked up by the mic) is discarded.
 - **Grounding**: source material is isolated in system sections; the dialogue is sent as real chat turns; every question asked so far is listed so none is re-asked; the canvas exercise stays hidden from the interviewer until it is on the candidate's screen; questions about the company are answered only from the job description; the interviewer never claims to run code.
@@ -197,7 +197,7 @@ npm run dev                  # http://localhost:3000  (microphone requires local
 ## Verification
 
 ```bash
-npm run check             # typecheck + lint + 133 unit tests
+npm run check             # typecheck + lint + 141 unit tests
 npm run build             # production build (what Vercel runs)
 npm run test:e2e          # API e2e: production server + real MongoDB + real Edge TTS + simulated LLM/STT, timed sections at 60x
 npm run test:live-browser # LIVE: Chromium + fake mic + real VAD/NVIDIA/Edge TTS/MongoDB; latency, captions, barge-in, canvas, report
@@ -210,11 +210,11 @@ Latest results on this codebase (details, methodology and every metric in **[doc
 
 | Suite | Result |
 |---|---|
-| Unit | 133 / 133 |
+| Unit | 141 / 141 |
 | API end-to-end | 29 / 29 |
-| Live browser (real Chromium, VAD, NVIDIA, Edge TTS, MongoDB) | 19 / 19 · voice turn 1.7-2.3 s end to end (median 2.08 s) · greeting 175-199 ms · barge-in 383-462 ms |
+| Live browser (real Chromium, VAD, NVIDIA, Edge TTS, MongoDB) | 19 / 19 · voice turn 1.6-2.3 s end to end (median 1.88 s over 5 runs) · greeting 175-308 ms · barge-in 366-469 ms |
 | Load | 30 concurrent candidates with real TTS: 210 turns, 0 errors, 420 clips, first audio p50 1.06 s · 50 concurrent: 450 turns, 0 errors, 11.5 turns/s |
-| Interview quality (LLM judge, 5 personas) | 4.86 / 5 mean; 4 of 5 interviews scored 5 in every dimension; strong vs vague candidate reports 88 vs 40 |
+| Interview quality (LLM judge, 5 personas) | 4.78 / 5 mean on the final build (4.86 on the previous one); strong vs vague candidate reports 78 vs 28 |
 | Lint · typecheck · production audit | clean · clean · 0 vulnerabilities |
 
 ## Reliability, Security, and Privacy

@@ -336,19 +336,27 @@ export function normalizeForCompare(text: string): string {
   return text.toLowerCase().replace(/[^a-z0-9 ]+/g, " ").replace(/\s+/g, " ").trim();
 }
 
-/** True when `candidate` opens the same way as `previous` (a repetition loop). */
+/**
+ * True when `candidate` repeats `previous` (a repetition loop): it opens the same
+ * way, or its words reappear together anywhere in `previous`, e.g. the same
+ * question asked again after a different preamble.
+ */
 export function isRepeatOf(candidate: string, previous: string): boolean {
   const a = normalizeForCompare(candidate);
   const b = normalizeForCompare(previous);
   if (!a || !b) return false;
   if (b.startsWith(a) || a.startsWith(b)) return Math.min(a.length, b.length) >= 12;
-  // Containment: how much of the new opening appears in the same-length start of `previous`.
+  // Containment: how much of the new text appears within a same-length window of `previous`.
   const aWords = a.split(" ");
   const wa = new Set(aWords);
   if (wa.size < 6) return false;
-  const wb = new Set(b.split(" ").slice(0, aWords.length + 3));
-  const overlap = [...wa].filter((w) => wb.has(w)).length;
-  return overlap / wa.size >= 0.85;
+  const bWords = b.split(" ");
+  for (let start = 0; start === 0 || start + aWords.length <= bWords.length; start++) {
+    const wb = new Set(bWords.slice(start, start + aWords.length + 3));
+    const overlap = [...wa].filter((w) => wb.has(w)).length;
+    if (overlap / wa.size >= 0.85) return true;
+  }
+  return false;
 }
 
 export function phaseForQuestion(questionNumber: number): string {

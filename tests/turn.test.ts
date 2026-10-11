@@ -508,6 +508,16 @@ describe("runTurn: immediate acknowledgements", () => {
   });
 });
 
+describe("withoutLeadingAcknowledgement", () => {
+  it("drops a second acknowledgement at the start of a regenerated draft", async () => {
+    const { withoutLeadingAcknowledgement } = await import("@/server/turn");
+    expect(withoutLeadingAcknowledgement("Okay, you're suggesting a token bucket in Redis.")).toBe("You're suggesting a token bucket in Redis.");
+    expect(withoutLeadingAcknowledgement("Got it. What did you measure?")).toBe("What did you measure?");
+    expect(withoutLeadingAcknowledgement("Okay so what happened next?")).toBe("Okay so what happened next?");
+    expect(withoutLeadingAcknowledgement("Thanks to the outbox table, events were reliable.")).toBe("Thanks to the outbox table, events were reliable.");
+  });
+});
+
 describe("isAcknowledgement", () => {
   it("recognizes short neutral acknowledgements only", async () => {
     const { isAcknowledgement } = await import("@/server/turn");
@@ -596,6 +606,112 @@ describe("runTurn: ending and premature wrap-up", () => {
     expect(providers.calls).toHaveLength(1);
     expect(store.transcripts.at(-1)?.content).toBe(closingLine("Jane"));
     expect(events.at(-1)).toEqual({ type: "done", limit_reached: true });
+  });
+
+  it("does not acknowledge twice when a draft is regenerated after its acknowledgement was spoken", async () => {
+    const earlier = "You mentioned owning the cutover plan. Can you walk me through one specific decision you made?";
+    store.transcripts = [
+      { role: "ai", content: earlier },
+      { role: "user", content: "We used an outbox table." },
+      { role: "ai", content: "How did you handle retries?" },
+    ];
+    let call = 0;
+    providers.tokens.mockImplementation(() =>
+      call++ === 0 ? tokens(["Okay. ", earlier]) : tokens(["Okay, you're suggesting idempotent consumers. ", "How did you test duplicate deliveries?"]),
+    );
+    const { events } = await run({ kind: "text", text: "Exponential backoff with a dead-letter queue." }, inProgress(6));
+    const spoken = events.filter((e) => e.type === "ai_sentence").map((e) => (e as { content: string }).content).join(" ");
+    expect(spoken).toBe("Okay. You're suggesting idempotent consumers. How did you test duplicate deliveries?");
+  });
+
+  it("regenerates when a question repeats an earlier one after a different preamble", async () => {
+    const earlier =
+      "Got it. Thank you for walking me through your experience. We'll now shift to a different area: can you tell me about a time when you had to influence a decision without direct authority, and what approach you used to align stakeholders?";
+    store.transcripts = [
+      { role: "ai", content: earlier },
+      { role: "user", content: "I ran a vision workshop with engineering and design." },
+      { role: "ai", content: "What came out of that workshop?" },
+    ];
+    let call = 0;
+    providers.tokens.mockImplementation(() =>
+      call++ === 0
+        ? tokens([
+            "Thanks for that detail. ",
+            "Okay, thank you for that example. ",
+            "We'll now shift to a different area: can you tell me about a time when you had to influence a decision without direct authority, and what approach you used to align stakeholders?",
+          ])
+        : tokens(["How did you decide which merchant problems to fix first when engineering time was tight?"]),
+    );
+    const { events } = await run({ kind: "text", text: "We agreed on a phased rollout." }, inProgress(10));
+    expect(providers.calls).toHaveLength(2);
+    const spoken = events.filter((e) => e.type === "ai_sentence").map((e) => (e as { content: string }).content).join(" ");
+    expect(spoken).toBe("Thanks for that detail. How did you decide which merchant problems to fix first when engineering time was tight?");
+  });
+
+  it("never speaks a later sentence that wraps up early: the reply continues with a question instead", async () => {
+    store.transcripts = [{ role: "ai", content: "Tell me about a project that didn't go as planned?" }];
+    let call = 0;
+    providers.tokens.mockImplementation(() =>
+      call++ === 0
+        ? tokens([
+            "Thank you for sharing those examples about feedback, hiring and setbacks. ",
+            "We've covered your on-call rotation and OKRs in good depth. ",
+            "That's all the time we have for this section. ",
+            "You can now press End interview to receive your report.",
+          ])
+        : tokens(["How do you decide when a struggling project should be paused rather than pushed through?"]),
+    );
+    const { events } = await run({ kind: "text", text: "Our inventory sync launch had a race condition." }, inProgress(10));
+    expect(providers.calls).toHaveLength(2);
+    expect(providers.calls[1][0].content).toMatch(/You have already said this aloud/);
+    expect(providers.calls[1][0].content).toMatch(/The interview is NOT over/);
+    const spoken = events.filter((e) => e.type === "ai_sentence").map((e) => (e as { content: string }).content);
+    expect(spoken).toEqual([
+      "Thank you for sharing those examples about feedback, hiring and setbacks.",
+      "We've covered your on-call rotation and OKRs in good depth.",
+      "How do you decide when a struggling project should be paused rather than pushed through?",
+    ]);
+    expect(events.at(-1)).toEqual({ type: "done" });
+  });
+
+  it("replaces a later question that re-asks an earlier one", async () => {
+    store.transcripts = [
+      { role: "ai", content: "Can you tell me about a time when you had to influence a decision without direct authority, and what approach you used?" },
+      { role: "user", content: "I built a prototype to win over the engineering lead." },
+      { role: "ai", content: "What did the prototype show?" },
+    ];
+    let call = 0;
+    providers.tokens.mockImplementation(() =>
+      call++ === 0
+        ? tokens([
+            "That prototype sounds like it made the trade-off concrete for the whole team. ",
+            "Can you tell me about a time when you had to influence a decision without direct authority, and what approach you used?",
+          ])
+        : tokens(["What would you do differently the next time several teams disagree on priorities?"]),
+    );
+    const { events } = await run({ kind: "text", text: "It cut onboarding time by thirty percent." }, inProgress(10));
+    expect(providers.calls).toHaveLength(2);
+    const spoken = events.filter((e) => e.type === "ai_sentence").map((e) => (e as { content: string }).content);
+    expect(spoken).toEqual([
+      "That prototype sounds like it made the trade-off concrete for the whole team.",
+      "What would you do differently the next time several teams disagree on priorities?",
+    ]);
+  });
+
+  it("on the last attempt, simply stops before a sentence that wraps up early", async () => {
+    store.transcripts = [{ role: "ai", content: "How do you mentor engineers?" }];
+    const drafts = [
+      ["We covered your migration work and the ledger design choices in real detail. ", "That's all the time we have for this section."],
+      ["Let's look at another part of your experience with payment systems for a moment. ", "That's all the time we have."],
+      ["One more area I'd like to explore is how you grow the engineers on your team. ", "That concludes our interview."],
+    ];
+    let call = 0;
+    providers.tokens.mockImplementation(() => tokens(drafts[Math.min(call++, 2)]));
+    const { events } = await run({ kind: "text", text: "Pairing and design reviews." }, inProgress(10));
+    expect(providers.calls).toHaveLength(3);
+    const spoken = events.filter((e) => e.type === "ai_sentence").map((e) => (e as { content: string }).content).join(" ");
+    expect(spoken).not.toMatch(/all the time we have|concludes/i);
+    expect(events.at(-1)).toEqual({ type: "done" });
   });
 
   it("never ends the interview on a question: a question in the closing turn is replaced by a closing line", async () => {

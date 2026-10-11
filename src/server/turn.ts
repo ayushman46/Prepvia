@@ -107,6 +107,20 @@ const ANTI_REPEAT_NOTE = (repeated: string) =>
   `\n\nIMPORTANT: Your draft repeated an earlier reply or echoed the candidate: "${repeated.slice(0, 300)}". ` +
   "Respond to what the candidate actually just said, in completely different words, and ask a different question that has not been asked yet.";
 
+const SAID_NOTE = (said: string) =>
+  `\n\nYou have already said this aloud in your current reply: "${said.slice(-400)}". Continue from there without repeating any of it.`;
+
+/** The first words of a rejected draft, enough to identify it without handing over text to copy. */
+const excerpt = (text: string) => `${text.split(/\s+/).slice(0, 10).join(" ")}…`;
+
+/**
+ * A question that re-asks one from an earlier reply, even after a different
+ * preamble. Short questions ("Why?") legitimately recur, so only longer ones count.
+ */
+function repeatsEarlierQuestion(sentence: string, avoid: string[]): boolean {
+  return sentence.includes("?") && sentence.split(/\s+/).length >= 8 && avoid.some((text) => text && text.length >= 12 && isRepeatOf(sentence, text));
+}
+
 const EMPTY_NOTE =
   "\n\nIMPORTANT: The interview is still in progress and your draft said nothing. " +
   "Reply to the candidate's latest message in a sentence, then ask your next question for this section.";
@@ -136,6 +150,14 @@ export function isAcknowledgement(sentence: string): boolean {
   return text.length <= 24 && !text.includes("?") && text.split(/\s+/).length <= 4 && /[.!]$/.test(text);
 }
 
+/** "Okay, you're suggesting…" right after "Okay." was already spoken → "You're suggesting…". */
+export function withoutLeadingAcknowledgement(sentence: string): string {
+  const match = /^(okay|ok|got it|sure|alright|all right|right|thanks|thank you|understood|no problem)[,.!]\s+(?=\S)/i.exec(sentence);
+  if (!match) return sentence;
+  const rest = sentence.slice(match[0].length);
+  return rest.charAt(0).toUpperCase() + rest.slice(1);
+}
+
 async function* guardedSentences(
   messages: ChatMessage[],
   /**
@@ -159,8 +181,13 @@ async function* guardedSentences(
 ): AsyncGenerator<string> {
   let note = "";
   let acknowledged = false;
+  // Everything said aloud so far in this reply, across attempts.
+  const spoken: string[] = [];
+  let released = false;
+  const avoidList = [...avoid];
   for (let attempt = 0; attempt <= MAX_REGENERATIONS; attempt++) {
-    const base = attempt === MAX_REGENERATIONS ? reducedMessages : messages;
+    const lastAttempt = attempt === MAX_REGENERATIONS;
+    const base = lastAttempt ? reducedMessages : messages;
     const attemptMessages = attempt === 0 ? base : [{ ...base[0], content: base[0].content + note }, ...base.slice(1)];
     const iterator = streamSentences(
       tapFirstToken(
@@ -173,6 +200,8 @@ async function* guardedSentences(
       ),
       { firstChunkMinChars: FIRST_CHUNK_MIN_CHARS },
     )[Symbol.asyncIterator]();
+    // Notes for the next attempt say what was already spoken, so it continues the reply.
+    const continuation = () => (released ? SAID_NOTE(spoken.join(" ")) : "");
 
     // Hold back the opening (at least REPEAT_CHECK_CHARS of substance) so generic
     // openers like "Thanks for sharing that." don't decide the check on their own.
@@ -191,47 +220,82 @@ async function* guardedSentences(
         first = false;
         if (!acknowledged) {
           acknowledged = true;
+          spoken.push(next.value);
           yield next.value;
         }
         continue;
       }
+      // A regenerated draft must not acknowledge again ("Okay. Okay, …").
+      const sentence = first && acknowledged ? withoutLeadingAcknowledgement(next.value) : next.value;
       first = false;
-      held.push(next.value);
-      hooks.onHeld?.(next.value);
+      held.push(sentence);
+      hooks.onHeld?.(sentence);
     }
     if (held.length === 0) {
       // Nothing to say (or only the end marker) stalls the interview unless it may close now.
-      if (notOverMinutes === null || attempt >= MAX_REGENERATIONS) return;
-      note = EMPTY_NOTE;
+      if (notOverMinutes === null || lastAttempt) return;
+      note = continuation() + EMPTY_NOTE;
       hooks.onRetry("empty");
       continue;
     }
     const opening = held.join(" ");
-    if (attempt < MAX_REGENERATIONS) {
-      // Reject a draft that repeats/parrots, or that starts wrapping up too early.
-      const repeat = avoid.some((text) => text && text.length >= 12 && isRepeatOf(opening, text));
+    if (!lastAttempt) {
+      // Reject a draft that repeats/parrots (as a whole, or one of its questions), or
+      // that starts wrapping up too early.
+      const repeat =
+        avoidList.some((text) => text && text.length >= 12 && isRepeatOf(opening, text)) ||
+        held.some((sentence) => repeatsEarlierQuestion(sentence, avoidList));
       const prematureClose = notOverMinutes !== null && PREMATURE_WRAP_UP.test(opening);
       if (repeat || prematureClose) {
         await iterator.return?.(undefined);
         // The last attempt sees only the first words: a full quote is itself something to copy.
-        const quoted = attempt + 1 === MAX_REGENERATIONS ? `${opening.split(/\s+/).slice(0, 10).join(" ")}…` : opening;
-        note = prematureClose ? NOT_OVER_NOTE(notOverMinutes as number) : ANTI_REPEAT_NOTE(quoted);
+        const quoted = attempt + 1 === MAX_REGENERATIONS ? excerpt(opening) : opening;
+        note = continuation() + (prematureClose ? NOT_OVER_NOTE(notOverMinutes as number) : ANTI_REPEAT_NOTE(quoted));
         hooks.onRetry(prematureClose ? "premature_wrap_up" : "repeat");
         continue;
       }
     }
+    // Later sentences are checked one by one as they arrive: one that wraps up too
+    // early or re-asks an earlier question is never spoken.
+    let violation: { reason: "repeat" | "premature_wrap_up"; sentence: string } | null = null;
     try {
-      for (const sentence of held) yield sentence;
+      for (const sentence of held) {
+        spoken.push(sentence);
+        released = true;
+        yield sentence;
+      }
       if (finished) return;
       for (;;) {
         const next = await iterator.next();
-        if (next.done) return;
+        if (next.done) {
+          finished = true;
+          return;
+        }
+        if (notOverMinutes !== null && PREMATURE_WRAP_UP.test(next.value)) {
+          violation = { reason: "premature_wrap_up", sentence: next.value };
+          break;
+        }
+        if (!lastAttempt && repeatsEarlierQuestion(next.value, avoidList)) {
+          violation = { reason: "repeat", sentence: next.value };
+          break;
+        }
+        spoken.push(next.value);
+        released = true;
         yield next.value;
       }
     } finally {
       // The consumer stopped early (e.g. after the first question): cancel the LLM stream.
       if (!finished) await iterator.return?.(undefined);
     }
+    // The last attempt simply ends before the offending sentence.
+    if (!violation || lastAttempt) return;
+    // Otherwise the next attempt continues the reply with a new question.
+    acknowledged = true;
+    avoidList.push(spoken.join(" "));
+    note =
+      continuation() +
+      (violation.reason === "premature_wrap_up" ? NOT_OVER_NOTE(notOverMinutes as number) : ANTI_REPEAT_NOTE(excerpt(violation.sentence)));
+    hooks.onRetry(violation.reason);
   }
 }
 
