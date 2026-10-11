@@ -3,7 +3,7 @@ import { readNdjson } from "@/lib/api";
 import { encodeWav } from "@/lib/wav";
 import { buildReportMessages, normalizeReport, summarizeIntegrity, toFivePoint } from "@/server/report";
 import { isPdf, normalizeResumeText } from "@/server/resume";
-import { cleanTranscript, transcribeAudio, validateWav } from "@/server/stt";
+import { __resetSttStateForTests, cleanTranscript, SttError, sttKeyState, transcribeAudio, validateWav } from "@/server/stt";
 import { escapeXml, generateSecMsGec } from "@/server/tts";
 
 async function wavBytes(seconds: number): Promise<Uint8Array> {
@@ -34,6 +34,15 @@ describe("transcript cleanup", () => {
     expect(cleanTranscript("I built a cache layer.")).toBe("I built a cache layer.");
   });
 
+  it("drops noise transcribed as stock phrases, sound tags or repeats, but keeps short real answers", () => {
+    for (const noise of ["Thank you. Thank you.", "[Music]", "♪ ♪", "Thanks.", "Thank you so much!", "(applause)", "Bye bye.", "Hmm."]) {
+      expect(cleanTranscript(noise)).toBe("");
+    }
+    for (const answer of ["Yes.", "No.", "Okay.", "Yeah, I did.", "Thank you, that was my first project."]) {
+      expect(cleanTranscript(answer)).toBe(answer);
+    }
+  });
+
   it("drops segments that are probably silence", () => {
     expect(
       cleanTranscript("ignored", [
@@ -49,6 +58,7 @@ describe("transcribeAudio", () => {
   afterEach(() => {
     process.env = { ...original };
     vi.unstubAllGlobals();
+    __resetSttStateForTests();
   });
 
   it("sends verbose_json requests to Groq and returns cleaned text", async () => {
@@ -78,6 +88,79 @@ describe("transcribeAudio", () => {
     vi.stubGlobal("fetch", fetchMock);
     expect(await transcribeAudio(await wavBytes(1))).toBe("Recovered");
     expect(fetchMock).toHaveBeenCalledTimes(2);
+  });
+
+  it("remembers an invalid key and stops calling Groq", async () => {
+    process.env.GROQ_API_KEY = "revoked";
+    const fetchMock = vi.fn(async () => new Response('{"error":{"code":"invalid_api_key"}}', { status: 401 }));
+    vi.stubGlobal("fetch", fetchMock);
+    await expect(transcribeAudio(await wavBytes(1))).rejects.toMatchObject({ reason: "invalid_key", retryable: false });
+    await expect(transcribeAudio(await wavBytes(1))).rejects.toMatchObject({ reason: "invalid_key" });
+    expect(fetchMock).toHaveBeenCalledTimes(1); // no retry, and no call while the key is known bad
+  });
+
+  it("does not retry a rate limit and honours Retry-After", async () => {
+    process.env.GROQ_API_KEY = "gq";
+    const fetchMock = vi.fn(async () => new Response("slow down", { status: 429, headers: { "retry-after": "3" } }));
+    vi.stubGlobal("fetch", fetchMock);
+    const error = (await transcribeAudio(await wavBytes(1)).catch((e) => e)) as SttError;
+    expect(error).toMatchObject({ reason: "rate_limited", retryAfterMs: 3_000 });
+    await expect(transcribeAudio(await wavBytes(1))).rejects.toMatchObject({ reason: "rate_limited" });
+    expect(fetchMock).toHaveBeenCalledTimes(1);
+  });
+
+  it("treats a clip Groq can't decode as nothing heard, but not a rejected model", async () => {
+    process.env.GROQ_API_KEY = "gq";
+    vi.stubGlobal("fetch", vi.fn(async () => new Response('{"error":{"message":"could not process file - is it a valid media file?"}}', { status: 400 })));
+    expect(await transcribeAudio(await wavBytes(1))).toBe("");
+    vi.stubGlobal("fetch", vi.fn(async () => new Response('{"error":{"message":"The model `whisper-x` has been decommissioned","code":"model_decommissioned"}}', { status: 400 })));
+    await expect(transcribeAudio(await wavBytes(1))).rejects.toMatchObject({ reason: "model", retryable: false });
+  });
+
+  it("reports a missing key as not configured", async () => {
+    delete process.env.GROQ_API_KEY;
+    await expect(transcribeAudio(await wavBytes(1))).rejects.toMatchObject({ reason: "not_configured", retryable: false });
+  });
+
+  it("lets speculative calls yield once the per-key request budget is nearly used", async () => {
+    process.env.GROQ_API_KEY = "gq";
+    const fetchMock = vi.fn(async () => Response.json({ text: "ok" }));
+    vi.stubGlobal("fetch", fetchMock);
+    const audio = await wavBytes(1);
+    for (let i = 0; i < 16; i++) await transcribeAudio(audio, { speculative: true });
+    await expect(transcribeAudio(audio, { speculative: true })).rejects.toMatchObject({ reason: "rate_limited" });
+    expect(await transcribeAudio(audio)).toBe("ok"); // a real turn still goes through
+    expect(fetchMock).toHaveBeenCalledTimes(17);
+  });
+});
+
+describe("sttKeyState", () => {
+  const original = { ...process.env };
+  afterEach(() => {
+    process.env = { ...original };
+    vi.unstubAllGlobals();
+    __resetSttStateForTests();
+  });
+
+  it("checks the key against Groq once and caches the answer", async () => {
+    process.env.GROQ_API_KEY = "gq";
+    const fetchMock = vi.fn(async () => Response.json({ data: [{ id: "whisper-large-v3-turbo" }] }));
+    vi.stubGlobal("fetch", fetchMock);
+    expect(await sttKeyState()).toBe("ok");
+    expect(await sttKeyState()).toBe("ok");
+    expect(fetchMock).toHaveBeenCalledTimes(1);
+    expect((fetchMock.mock.calls[0] as unknown as [string])[0]).toBe("https://api.groq.com/openai/v1/models");
+  });
+
+  it("reports an invalid key, a missing model and a missing key", async () => {
+    process.env.GROQ_API_KEY = "revoked";
+    vi.stubGlobal("fetch", vi.fn(async () => new Response("no", { status: 401 })));
+    expect(await sttKeyState()).toBe("invalid_key");
+    __resetSttStateForTests();
+    vi.stubGlobal("fetch", vi.fn(async () => Response.json({ data: [{ id: "some-other-model" }] })));
+    expect(await sttKeyState()).toBe("model_unavailable");
+    delete process.env.GROQ_API_KEY;
+    expect(await sttKeyState()).toBe("not_configured");
   });
 });
 

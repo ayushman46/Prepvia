@@ -38,7 +38,7 @@ Candidates can upload a PDF resume, enter their name and target role, and paste 
 
 ### Voice-First Practice
 
-The browser uses local Silero voice activity detection to capture natural utterances. Candidates speak (typing is available as a fallback), hear the interviewer respond, and see a live transcript.
+The browser uses local Silero voice activity detection to capture natural utterances. Candidates speak (typing is available as a fallback), hear the interviewer respond, and see a live transcript. A noise gate ignores clicks, coughs and distant voices; in a noisy room, **push-to-talk** (hold Space or the on-screen button while answering) is one click away, and the room suggests it when it keeps hearing background sound.
 
 ### Adaptive, Time-Boxed Interviewing
 
@@ -112,7 +112,7 @@ Serverless functions can't hold a 20-minute WebSocket open (Vercel's beta WebSoc
 | Technique | Effect |
 |---|---|
 | Opening prefetched while the candidate is in the lobby | Greeting audible **~190 ms** after pressing Start |
-| **Speculative STT**: the browser mirrors the VAD state machine and transcribes after 250 ms of silence, inside the 800 ms end-of-turn window | STT removed from the critical path |
+| **Speculative STT**: the browser mirrors the VAD state machine and transcribes after 350 ms of silence, inside the 800 ms end-of-turn window (only for utterances that pass the noise gate) | STT removed from the critical path |
 | Realtime model chosen by benchmark: Nemotron 3 Super, reasoning off (p50 ~250 ms, p90 ~300 ms to first token on a realistic prompt) | Fast *and* strongest replies |
 | **Hedged requests**: if no token after 800 ms, a second request races on a different model's queue | Free-tier queueing spikes (7-12 s seen) no longer stall the conversation |
 | **Warm Edge TTS socket pool**, opened at the start of each turn; reused across sentences; recycled before Edge's ~35 s idle cutoff; slow syntheses hedged on a fresh socket | ~400 ms handshake removed; warm sentence synthesis ~220-260 ms |
@@ -194,13 +194,23 @@ cp .env.example .env.local   # fill in MONGODB_URI, GROQ_API_KEY, NVIDIA_API_KEY
 npm run dev                  # http://localhost:3000  (microphone requires localhost or HTTPS)
 ```
 
+## Troubleshooting voice input
+
+If speaking does nothing:
+
+1. **Open `/api/health`.** `"stt": "invalid_key"` means the Groq key is wrong (create a new one at console.groq.com and set `GROQ_API_KEY`); the room switches to typing and says so after the first spoken answer.
+2. **Read the message under the transcript.** The room names the cause: microphone permission denied, blocked by the operating system (macOS: System Settings › Privacy & Security › Microphone), no microphone found, microphone busy (another app such as Zoom or Teams), or no sound from the microphone. Each has a "try again" or "restart microphone" button.
+3. **Background voices or noise?** If other people are talking near you, switch to push-to-talk ("Noisy room? Use push-to-talk" under the transcript, or the checkbox in the lobby) and hold Space while you answer.
+4. **Testing locally:** `npm run test:real-mic -- --stt=fake` speaks answers out loud through your speakers into your real microphone and reports what the app detects (see the script header for its modes).
+
 ## Verification
 
 ```bash
-npm run check             # typecheck + lint + 141 unit tests
+npm run check             # typecheck + lint + 161 unit tests
 npm run build             # production build (what Vercel runs)
 npm run test:e2e          # API e2e: production server + real MongoDB + real Edge TTS + simulated LLM/STT, timed sections at 60x
-npm run test:live-browser # LIVE: Chromium + fake mic + real VAD/NVIDIA/Edge TTS/MongoDB; latency, captions, barge-in, canvas, report
+npm run test:live-browser # LIVE: Chromium + fake mic + real VAD/NVIDIA/Edge TTS/MongoDB; latency, captions, barge-in, push-to-talk, canvas, report
+npm run test:real-mic     # LIVE, manual: your real microphone + speakers (macOS `say`); hands-free, push-to-talk, sensitivity, next dev
 npm run test:quality      # LIVE: LLM-simulated candidates (5 personas) + deterministic checks + LLM judge on real NVIDIA
 node tests/load/run.mjs --users=50 --turns=8 --tts=off   # concurrency, tail latency, data integrity
 npm run test:live         # Edge TTS pool against the real service
@@ -210,9 +220,10 @@ Latest results on this codebase (details, methodology and every metric in **[doc
 
 | Suite | Result |
 |---|---|
-| Unit | 141 / 141 |
+| Unit | 161 / 161 |
 | API end-to-end | 29 / 29 |
-| Live browser (real Chromium, VAD, NVIDIA, Edge TTS, MongoDB) | 19 / 19 · voice turn 1.6-2.3 s end to end (median 1.88 s over 5 runs) · greeting 175-308 ms · barge-in 366-469 ms |
+| Live browser (real Chromium, VAD, NVIDIA, Edge TTS, MongoDB) | 21 / 21 · voice turn 1.6-2.3 s end to end (median 1.88 s over 5 runs) · greeting 175-308 ms · barge-in 366-469 ms |
+| Real microphone (MacBook Air, Chromium and Brave) | voice works under `next dev` and production; 0 requests from background sound; 1 transcription per answer; invalid key → typing after 1 request |
 | Load | 30 concurrent candidates with real TTS: 210 turns, 0 errors, 420 clips, first audio p50 1.06 s · 50 concurrent: 450 turns, 0 errors, 11.5 turns/s |
 | Interview quality (LLM judge, 5 personas) | 4.78 / 5 mean on the final build (4.86 on the previous one); strong vs vague candidate reports 78 vs 28 |
 | Lint · typecheck · production audit | clean · clean · 0 vulnerabilities |
@@ -220,7 +231,7 @@ Latest results on this codebase (details, methodology and every metric in **[doc
 ## Reliability, Security, and Privacy
 
 - **No cold-start backend**; static pages from Vercel's CDN.
-- **Graceful degradation**: hedging and failover across two NVIDIA models and Groq; a live provider that hasn't started streaming within 6 s is abandoned, and a turn whose providers all failed quickly is retried once; STT retry; per-sentence browser speech when TTS fails; a stall guard in the player; typed answers without a microphone; retryable errors that never lose a saved answer; refresh-safe resume.
+- **Graceful degradation**: microphone errors explained with a way to retry, device changes followed automatically, a dead or silent microphone detected; an invalid speech-to-text key switches the room to typing; hedging and failover across two NVIDIA models and Groq; a live provider that hasn't started streaming within 6 s is abandoned, and a turn whose providers all failed quickly is retried once; STT retry; per-sentence browser speech when TTS fails; a stall guard in the player; typed answers without a microphone; retryable errors that never lose a saved answer; refresh-safe resume.
 - **Never speaks errors or internals**: provider failures become structured `error` events; control markers are stripped.
 - **Abuse protection**: per-IP limits on sessions, uploads, turns, reports, and transcriptions; per-session turn cap; 4 MB body limits; input length limits.
 - **Private links**: 128-bit random interview IDs; interview and report pages are `noindex`.

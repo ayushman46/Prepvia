@@ -312,6 +312,41 @@ async function scenarioConversation(browser, fixtures) {
     return `"${reply.slice(0, 80)}…"`;
   });
 
+  await step("push-to-talk: speech is ignored until Space is held, then the held answer is sent", async () => {
+    await page.getByTestId("capture-mode").click();
+    await waitForStatus(page, /hold Space/, 5_000);
+    const usersBefore = await page.getByTestId("msg-user").count();
+    await setTranscript("This background chatter must never be sent.");
+    await playAnswer(page, fixtures.answers[0].wav); // nobody is holding Space
+    await sleep(2_500);
+    assert.equal(await page.getByTestId("msg-user").count(), usersBefore, "speech without the key held is not sent");
+    await setTranscript(fixtures.ptt.text);
+    await page.evaluate(() => document.activeElement instanceof HTMLElement && document.activeElement.blur());
+    await page.keyboard.down("Space");
+    await waitForStatus(page, /Recording/, 3_000);
+    await playAnswer(page, fixtures.ptt.wav);
+    await page.keyboard.up("Space");
+    await page.getByTestId("msg-user").filter({ hasText: fixtures.ptt.text.slice(0, 24) }).last().waitFor({ timeout: 20_000 });
+    await waitForStatus(page, /Your turn/, 120_000);
+    const reply = await lastAiText(page);
+    await page.getByTestId("capture-mode").click(); // back to hands-free for the rest of the run
+    await waitForStatus(page, /speak naturally/, 5_000);
+    return `held answer sent; reply: "${reply.slice(0, 70)}…"`;
+  });
+
+  await step("a microphone that disconnects mid-interview is reopened automatically", async () => {
+    const before = await page.evaluate(() => window.__fakeMic.dest.stream.id);
+    // The browser fires "ended" when a device is unplugged or permission is revoked.
+    await page.evaluate(() => window.__fakeMic.dest.stream.getAudioTracks()[0].dispatchEvent(new Event("ended")));
+    await waitUntil(async () => (await page.evaluate(() => window.__fakeMic.dest.stream.id)) !== before, { timeout: 5_000, message: "capture reopened" });
+    await waitForStatus(page, /speak naturally/, 5_000);
+    await setTranscript(fixtures.recover.text);
+    await playAnswer(page, fixtures.recover.wav);
+    await page.getByTestId("msg-user").filter({ hasText: fixtures.recover.text.slice(0, 24) }).last().waitFor({ timeout: 20_000 });
+    await waitForStatus(page, /Your turn/, 120_000);
+    return "capture reopened on a new stream and the next spoken answer went through";
+  });
+
   await step("refreshing mid-interview resumes with the full transcript and no repeated greeting", async () => {
     const serverTranscript = (await api(`/api/interview/${id}`)).body.transcript.length;
     await page.reload();
@@ -489,6 +524,14 @@ const fixtures = {
     "Jane Doe, Senior Backend Engineer (6 years). Acme Pay: led migration of payments ledger from Rails monolith to Go on Kafka; reconciliation errors down 70%. Idempotent payment APIs at 2M requests/day. Mentored 3 engineers. Go, Python, PostgreSQL, Kafka, Redis, Kubernetes.",
   answers: fixtureTexts.map((text, i) => ({ text, wav: speak(dir, `answer${i}`, text) })),
   barge: { text: "Sorry to interrupt, can I add one more detail about the rollout?", wav: speak(dir, "barge", "Sorry to interrupt, can I add one more detail about the rollout?") },
+  ptt: {
+    text: "I would alert on consumer lag and page the on call engineer if it keeps growing for five minutes.",
+    wav: speak(dir, "ptt", "I would alert on consumer lag and page the on call engineer if it keeps growing for five minutes."),
+  },
+  recover: {
+    text: "After an incident we wrote a short postmortem and added a load test for the hot path.",
+    wav: speak(dir, "recover", "After an incident we wrote a short postmortem and added a load test for the hot path."),
+  },
   pdfPath: join(dir, "resume.pdf"),
 };
 // Minimal one-page PDF resume for the upload flow.

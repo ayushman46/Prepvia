@@ -6,6 +6,8 @@ export class ClientApiError extends Error {
     public readonly status: number,
     public readonly code: string,
     message: string,
+    /** From Retry-After on 429 responses. */
+    public readonly retryAfterMs?: number,
   ) {
     super(message);
     this.name = "ClientApiError";
@@ -19,7 +21,9 @@ async function toError(response: Response): Promise<ClientApiError> {
   } catch {
     // non-JSON error (e.g. platform 413/504 page)
   }
-  if (body?.error?.message) return new ClientApiError(response.status, body.error.code || "error", body.error.message);
+  const retryAfter = Number(response.headers.get("retry-after"));
+  const retryAfterMs = Number.isFinite(retryAfter) && retryAfter > 0 ? retryAfter * 1000 : undefined;
+  if (body?.error?.message) return new ClientApiError(response.status, body.error.code || "error", body.error.message, retryAfterMs);
   if (response.status === 413) return new ClientApiError(413, "payload_too_large", "That file or recording is too large.");
   if (response.status === 504) return new ClientApiError(504, "timeout", "The server took too long to respond. Please try again.");
   return new ClientApiError(response.status, "http_error", `Request failed (${response.status}). Please try again.`);

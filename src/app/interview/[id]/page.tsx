@@ -9,8 +9,8 @@ import { InterviewerOrb, type OrbMode } from "@/components/InterviewerOrb";
 import { TranscriptPane } from "@/components/TranscriptPane";
 import { useIntegrity } from "@/hooks/useIntegrity";
 import { useInterview } from "@/hooks/useInterview";
-import { useVAD } from "@/hooks/useVAD";
-import { endInterview, transcribeSpeculative, type SpeculativeTranscript } from "@/lib/api";
+import { describeMicError, useVAD, type CaptureMode } from "@/hooks/useVAD";
+import { ClientApiError, endInterview, transcribeSpeculative, type SpeculativeTranscript } from "@/lib/api";
 import { cn } from "@/lib/cn";
 import { LIMITS } from "@/lib/protocol";
 import { encodeWav } from "@/lib/wav";
@@ -33,6 +33,17 @@ const SECTION_LABELS: Record<string, string> = {
 const BARGE_IN_WINDOW = 10;
 const BARGE_IN_FRAMES = 7;
 const BARGE_IN_PROBABILITY = 0.7;
+/** Background-noise events (ignored sounds, empty transcripts) within a minute before suggesting push-to-talk. */
+const NOISY_ROOM_EVENTS = 4;
+const CAPTURE_MODE_KEY = "interviewai:capture-mode";
+
+function readCaptureMode(): CaptureMode {
+  try {
+    return window.localStorage.getItem(CAPTURE_MODE_KEY) === "push" ? "push" : "auto";
+  } catch {
+    return "auto";
+  }
+}
 
 function formatClock(totalSeconds: number) {
   const sign = totalSeconds < 0 ? "+" : "";
@@ -47,7 +58,7 @@ function InterviewRoom() {
   const debug = search.get("debug") === "1";
   const sessionId = params.id;
   const interview = useInterview(sessionId);
-  const { session, messages, turnStatus, error, notice, limitReached, questionNumber, sendTurn, started, canvas } = interview;
+  const { session, messages, turnStatus, error, notice, limitReached, questionNumber, sendTurn, started, canvas, voiceUnavailable } = interview;
 
   const [muted, setMuted] = useState(false);
   const [micError, setMicError] = useState<string | null>(null);
@@ -56,55 +67,135 @@ function InterviewRoom() {
   const [confirmEnd, setConfirmEnd] = useState(false);
   const [ending, setEnding] = useState(false);
   const [allowInterrupt, setAllowInterrupt] = useState(true);
+  /** "auto": hands-free voice detection; "push": hold Space or the button while answering (noisy rooms). */
+  // The room renders a loading screen first on both server and client, so reading
+  // storage in the initializer can't cause a hydration mismatch.
+  const [captureMode, setCaptureModeState] = useState<CaptureMode>(readCaptureMode);
+  const [holding, setHolding] = useState(false);
+  const [noisyRoom, setNoisyRoom] = useState(false);
+  const noiseEvents = useRef<number[]>([]);
+  const lastHintAt = useRef<Record<string, number>>({});
   const [mobileTab, setMobileTab] = useState<"interview" | "canvas">("interview");
   const [now, setNow] = useState(() => Date.now());
   const micLevel = useRef(0);
   const bargeWindow = useRef<boolean[]>([]);
   /** Speculative transcripts started during the candidate's pauses, by tracker id. */
-  const speculations = useRef(new Map<number, Promise<SpeculativeTranscript | null>>());
+  const speculations = useRef(new Map<number, { promise: Promise<SpeculativeTranscript | null>; controller: AbortController }>());
+  /** After a 429 from /transcribe, skip speculation until then (performance.now()). */
+  const speculationBlockedUntil = useRef(0);
+  const flashNotice = interview.flashNotice;
+  const claimFloorRef = useRef<() => void>(() => undefined);
+  const pushEndRef = useRef<() => Promise<void>>(async () => undefined);
+  const markVoiceUnavailable = interview.markVoiceUnavailable;
 
   const integrity = useIntegrity(sessionId, started && !limitReached && !ending);
 
-  const accepting = started && turnStatus === "ready" && !muted && !limitReached && !ending;
+  const accepting = started && turnStatus === "ready" && !muted && !limitReached && !ending && !voiceUnavailable;
+
+  const setCaptureMode = (next: CaptureMode) => {
+    void pushEndRef.current(); // a hold in progress is sent, never left running
+    setCaptureModeState(next);
+    setNoisyRoom(false);
+    try {
+      window.localStorage.setItem(CAPTURE_MODE_KEY, next);
+    } catch {
+      // storage unavailable: the choice lasts for this page only
+    }
+  };
+
+  /** Show a hint at most once per `everyMs` per kind. */
+  const hint = (kind: string, message: string, everyMs: number) => {
+    const now = performance.now();
+    if (now - (lastHintAt.current[kind] ?? -Infinity) < everyMs) return;
+    lastHintAt.current[kind] = now;
+    flashNotice(message);
+  };
+  const noteNoise = () => {
+    const now = performance.now();
+    noiseEvents.current = [...noiseEvents.current.filter((t) => now - t < 60_000), now];
+    if (noiseEvents.current.length >= NOISY_ROOM_EVENTS) setNoisyRoom(true);
+  };
 
   const vadCallbacks = useMemo(
     () => ({
       onSpeculate: (audio: Float32Array, id: number) => {
-        speculations.current.set(
-          id,
-          transcribeSpeculative(sessionId, encodeWav(audio)).catch(() => null),
-        );
+        if (performance.now() < speculationBlockedUntil.current) return;
+        const controller = new AbortController();
+        const promise = transcribeSpeculative(sessionId, encodeWav(audio), controller.signal).catch((error: unknown) => {
+          if (error instanceof ClientApiError) {
+            if (error.status === 429) speculationBlockedUntil.current = performance.now() + (error.retryAfterMs ?? 5_000);
+            if (error.code === "stt_unavailable") markVoiceUnavailable();
+          }
+          return null; // the turn falls back to uploading the audio
+        });
+        speculations.current.set(id, { promise, controller });
+      },
+      onCancelSpeculation: (id: number) => {
+        speculations.current.get(id)?.controller.abort();
+        speculations.current.delete(id);
       },
       onUtterance: (audio: Float32Array, endedAt: number, speculationId: number | null) => {
-        const transcript = speculationId !== null ? speculations.current.get(speculationId) : undefined;
+        const transcript = speculationId !== null ? speculations.current.get(speculationId)?.promise : undefined;
+        for (const [id, speculation] of speculations.current) if (id !== speculationId) speculation.controller.abort();
         speculations.current.clear();
         void sendTurn({ audio: encodeWav(audio), transcript }, { inputAt: endedAt });
       },
-      onFrame: (probability: number, level: number) => {
+      onRejected: (reason: "short" | "quiet") => {
+        noteNoise();
+        if (reason === "quiet") hint("faint", "I can hear you only faintly. Move closer to the microphone or reduce background noise.", 20_000);
+      },
+      onHoldLimit: () => {
+        hint("hold-limit", "Answers are limited to 2 minutes, so I've sent what you said so far.", 10_000);
+        void pushEndRef.current();
+      },
+      onDropped: () => {
+        if (turnStatus !== "processing") return; // while Aria speaks, talking over her is barge-in's job
+        noteNoise();
+        hint("busy", "Aria is still thinking. Please repeat that once she has replied.", 10_000);
+      },
+      onFrame: (probability: number, level: number, rms: number, noiseFloor: number) => {
         micLevel.current = level;
         if (debug) {
-          const w = window as unknown as { __vadProbs?: { t: number; p: number }[] };
-          (w.__vadProbs ??= []).push({ t: performance.now(), p: probability });
+          const w = window as unknown as { __vadProbs?: { t: number; p: number; rms: number; floor: number }[] };
+          (w.__vadProbs ??= []).push({ t: performance.now(), p: probability, rms, floor: noiseFloor });
           if (w.__vadProbs.length > 3_000) w.__vadProbs.splice(0, 1_000);
         }
-        // Barge-in: sustained, confident speech while the interviewer is talking.
-        if (allowInterrupt && turnStatus === "speaking") {
+        // Barge-in: sustained, confident speech while the interviewer is talking (hands-free mode only).
+        if (allowInterrupt && captureMode === "auto" && turnStatus === "speaking") {
           const recent = bargeWindow.current;
           recent.push(probability >= BARGE_IN_PROBABILITY);
           if (recent.length > BARGE_IN_WINDOW) recent.shift();
           if (recent.filter(Boolean).length >= BARGE_IN_FRAMES) {
             bargeWindow.current = [];
-            interview.interrupt();
+            if (interview.interrupt()) claimFloorRef.current();
           }
         } else if (bargeWindow.current.length) {
           bargeWindow.current = [];
         }
       },
     }),
-    [sendTurn, allowInterrupt, turnStatus, interview, sessionId, debug],
+    // eslint-disable-next-line react-hooks/exhaustive-deps -- hint/noteNoise only touch refs and stable setters
+    [sendTurn, allowInterrupt, captureMode, turnStatus, interview, sessionId, debug, flashNotice, markVoiceUnavailable],
   );
-  const vad = useVAD(vadCallbacks, accepting);
+  const vad = useVAD(vadCallbacks, accepting, captureMode);
+  useEffect(() => {
+    claimFloorRef.current = vad.claimFloor;
+  }, [vad.claimFloor]);
   const micAvailable = !micError && !vad.errored;
+  const micLive = vad.listening && !muted && micAvailable && !voiceUnavailable;
+
+  // Speech-to-text can't work on this server: stop listening (typing is shown instead).
+  useEffect(() => {
+    if (voiceUnavailable) void vad.pause();
+    // eslint-disable-next-line react-hooks/exhaustive-deps -- vad.pause is stable
+  }, [voiceUnavailable]);
+  const typing = textMode || voiceUnavailable;
+
+  // Empty transcripts count as background noise too.
+  const noSpeechCount = interview.noSpeechCount;
+  useEffect(() => {
+    if (noSpeechCount > 0) noteNoise();
+  }, [noSpeechCount]);
 
   // Clock
   useEffect(() => {
@@ -113,19 +204,72 @@ function InterviewRoom() {
     return () => clearInterval(timer);
   }, [started]);
 
-  // Space bar interrupts the interviewer (unless typing).
-  const interruptRef = useRef(interview.interrupt);
+  // Push-to-talk: record while Space or the on-screen button is held.
+  const holdingRef = useRef(false);
+  /** Returns true when a hold began (the caller then owns the key/button press). */
+  const pushStart = (): boolean => {
+    if (captureMode !== "push" || !started || limitReached || ending || !micLive || holdingRef.current) return false;
+    if (turnStatus === "processing") {
+      hint("busy", "Aria is still thinking. Hold to answer once she has replied.", 5_000);
+      return false;
+    }
+    if (turnStatus === "speaking") interview.interrupt();
+    if (!vad.beginHold()) return false;
+    holdingRef.current = true;
+    setHolding(true);
+    return true;
+  };
+  const pushEnd = async (): Promise<void> => {
+    if (!holdingRef.current) return;
+    holdingRef.current = false;
+    setHolding(false);
+    const audio = await vad.endHold();
+    if (!audio) {
+      hint("hold", "Hold the button (or Space) while you speak, then release it.", 5_000);
+      return;
+    }
+    void sendTurn({ audio: encodeWav(audio) });
+  };
+
+  // Space bar: interrupts the interviewer (hands-free) or is the push-to-talk key (unless typing).
+  const keysRef = useRef({ interrupt: interview.interrupt, mode: captureMode, pushStart, pushEnd });
   useEffect(() => {
-    interruptRef.current = interview.interrupt;
-  }, [interview.interrupt]);
+    keysRef.current = { interrupt: interview.interrupt, mode: captureMode, pushStart, pushEnd };
+    pushEndRef.current = pushEnd;
+  });
   useEffect(() => {
-    const onKey = (event: KeyboardEvent) => {
+    const typing = (event: KeyboardEvent) =>
+      (event.target as HTMLElement | null)?.closest("input, textarea, select, [contenteditable='true'], .cm-editor");
+    // In push mode Space still activates a focused control (accessibility), except the talk button.
+    const control = (event: KeyboardEvent) => {
       const target = event.target as HTMLElement | null;
-      if (event.code !== "Space" || target?.closest("input, textarea, select, [contenteditable='true'], .cm-editor")) return;
-      if (interruptRef.current()) event.preventDefault();
+      return !!target?.closest("button, a, [role='button'], input, select") && !target.closest("[data-testid='push-to-talk']");
     };
-    window.addEventListener("keydown", onKey);
-    return () => window.removeEventListener("keydown", onKey);
+    const onDown = (event: KeyboardEvent) => {
+      if (event.code !== "Space" || typing(event)) return;
+      if (keysRef.current.mode === "push") {
+        if (control(event)) return;
+        event.preventDefault();
+        if (!event.repeat) keysRef.current.pushStart();
+        return;
+      }
+      if (keysRef.current.interrupt()) event.preventDefault();
+    };
+    const onUp = (event: KeyboardEvent) => {
+      if (event.code !== "Space" || !holdingRef.current) return;
+      event.preventDefault();
+      void keysRef.current.pushEnd();
+    };
+    // Releasing outside the window must not leave the recorder running.
+    const onBlur = () => void keysRef.current.pushEnd();
+    window.addEventListener("keydown", onDown);
+    window.addEventListener("keyup", onUp);
+    window.addEventListener("blur", onBlur);
+    return () => {
+      window.removeEventListener("keydown", onDown);
+      window.removeEventListener("keyup", onUp);
+      window.removeEventListener("blur", onBlur);
+    };
   }, []);
 
   // Show the canvas tab on mobile as soon as an exercise arrives (derived state).
@@ -141,8 +285,8 @@ function InterviewRoom() {
       try {
         await vad.start();
         setMicError(null);
-      } catch {
-        setMicError("Microphone access was blocked. Allow it in your browser's site settings, or continue by typing.");
+      } catch (error) {
+        setMicError(describeMicError(error).message);
         setTextMode(true);
       }
     } else {
@@ -151,10 +295,21 @@ function InterviewRoom() {
     await interview.begin();
   };
 
-  const toggleMute = async () => {
-    if (muted) {
-      await vad.start().catch(() => setMicError("Couldn't re-enable the microphone."));
+  /** Turn the microphone (back) on: after a failure, "Continue without a microphone", or mute. */
+  const enableMic = async () => {
+    try {
+      await vad.start();
+      setMicError(null);
       setMuted(false);
+    } catch (error) {
+      setMicError(describeMicError(error).message);
+      setTextMode(true);
+    }
+  };
+
+  const toggleMute = async () => {
+    if (muted || !vad.listening) {
+      await enableMic();
     } else {
       await vad.pause();
       setMuted(true);
@@ -236,18 +391,33 @@ function InterviewRoom() {
     : turnStatus === "processing"
       ? "Thinking…"
       : turnStatus === "speaking"
-        ? allowInterrupt && micAvailable && !muted
-          ? "Aria is speaking · talk or press Space to interrupt"
-          : "Aria is speaking"
+        ? captureMode === "push" && micLive
+          ? "Aria is speaking · hold Space to interrupt and answer"
+          : allowInterrupt && micLive
+            ? "Aria is speaking · talk or press Space to interrupt"
+            : "Aria is speaking"
         : limitReached
           ? "Interview complete"
-          : muted || !micAvailable
-            ? textMode
+          : !micLive
+            ? typing
               ? "Your turn · type your answer"
-              : "Microphone muted"
-            : userSpeaking
-              ? "Listening…"
-              : "Your turn · speak naturally";
+              : muted
+                ? "Microphone muted"
+                : "Microphone off"
+            : captureMode === "push"
+              ? holding
+                ? "Recording… release to send"
+                : "Your turn · hold Space or the button to answer"
+              : userSpeaking
+                ? "Listening…"
+                : "Your turn · speak naturally";
+
+  const captureIssueText: Record<string, string> = {
+    ended: "Your microphone stopped. It may have been disconnected.",
+    muted: "Your microphone is muted by the system or another app.",
+    silent: "No sound is coming from your microphone. Check it isn't muted or set to the wrong device.",
+    stalled: "The microphone paused.",
+  };
 
   const stage = (
     <section className="relative flex min-h-0 flex-1 flex-col overflow-hidden rounded-[28px] border-2 border-vast bg-vast p-4 text-cream md:rounded-[40px] md:p-6">
@@ -274,7 +444,49 @@ function InterviewRoom() {
             )}
           </div>
         )}
-        {micError && <p className="max-w-2xl text-center text-sm text-ember">{micError}</p>}
+        {started && !limitReached && voiceUnavailable && !error && (
+          <p role="alert" className="max-w-2xl text-center text-sm font-medium text-ember" data-testid="voice-unavailable">
+            Voice answers aren&apos;t available right now: speech recognition isn&apos;t working on this server. Please type your answers.
+          </p>
+        )}
+        {started && !limitReached && micLive && vad.captureIssue && (
+          <div role="alert" className="flex w-full max-w-2xl items-center justify-between gap-3 rounded-2xl border-2 border-vast bg-ember px-4 py-2 text-sm text-vast">
+            <span className="font-medium">{captureIssueText[vad.captureIssue]}</span>
+            <button
+              onClick={() => void (vad.captureIssue === "ended" ? enableMic() : vad.restart())}
+              className="flex shrink-0 items-center gap-1 rounded-lg border-2 border-vast bg-cream px-3 py-1 font-bold"
+            >
+              <RotateCcw size={14} /> Restart microphone
+            </button>
+          </div>
+        )}
+        {micError && (
+          <div className="flex max-w-2xl flex-col items-center gap-1 text-center text-sm text-ember" data-testid="mic-error">
+            <p>{micError}</p>
+            {started && !voiceUnavailable && (
+              <button onClick={() => void enableMic()} className="font-bold underline underline-offset-4">
+                Try the microphone again
+              </button>
+            )}
+          </div>
+        )}
+        {started && !limitReached && noisyRoom && captureMode === "auto" && micLive && (
+          <div className="flex w-full max-w-2xl flex-wrap items-center justify-center gap-2 rounded-2xl border-2 border-lavender px-4 py-2 text-sm" data-testid="noisy-hint">
+            <span>There&apos;s a lot of background sound. Push-to-talk works better in noisy rooms.</span>
+            <button
+              onClick={(e) => {
+                e.currentTarget.blur();
+                setCaptureMode("push");
+              }}
+              className="rounded-lg border-2 border-vast bg-lavender px-3 py-1 font-bold text-vast"
+            >
+              Use push-to-talk
+            </button>
+            <button onClick={() => setNoisyRoom(false)} className="text-cream/70 underline underline-offset-4">
+              Dismiss
+            </button>
+          </div>
+        )}
         {notice && <p className="text-sm font-medium text-lavender">{notice}</p>}
         {integrity.tabSwitches === 1 && !limitReached && (
           <p className="text-xs text-cream/60">Leaving the interview tab is noted in your report.</p>
@@ -298,9 +510,41 @@ function InterviewRoom() {
                   <Hand size={15} /> Interrupt
                 </button>
               )}
-              {micAvailable && !muted && turnStatus !== "speaking" && <MicMeter levelRef={micLevel} active={accepting} />}
+              {micLive && turnStatus !== "speaking" && captureMode === "auto" && <MicMeter levelRef={micLevel} active={accepting} />}
             </div>
-            {textMode && (
+            {micLive && captureMode === "push" && (
+              <button
+                onPointerDown={(e) => {
+                  e.currentTarget.setPointerCapture(e.pointerId);
+                  pushStart();
+                }}
+                onPointerUp={() => void pushEnd()}
+                onPointerCancel={() => void pushEnd()}
+                onContextMenu={(e) => e.preventDefault()}
+                disabled={turnStatus === "processing"}
+                className={cn(
+                  "flex select-none items-center gap-2 rounded-full border-2 border-vast px-6 py-3 font-bold text-vast transition-transform disabled:opacity-50",
+                  holding ? "scale-105 bg-ember" : "bg-lavender",
+                )}
+                style={{ touchAction: "none" }}
+                data-testid="push-to-talk"
+              >
+                <Mic size={18} /> {holding ? "Release to send" : "Hold to talk"}
+              </button>
+            )}
+            {micLive && (
+              <button
+                onClick={(e) => {
+                  e.currentTarget.blur();
+                  setCaptureMode(captureMode === "auto" ? "push" : "auto");
+                }}
+                className="text-xs text-cream/60 underline underline-offset-4"
+                data-testid="capture-mode"
+              >
+                {captureMode === "auto" ? "Noisy room? Use push-to-talk" : "Switch to hands-free"}
+              </button>
+            )}
+            {typing && (
               <form onSubmit={submitText} className="flex w-full max-w-2xl gap-2">
                 <label htmlFor="answer" className="sr-only">Type your answer</label>
                 <textarea
@@ -370,7 +614,7 @@ function InterviewRoom() {
             </button>
           )}
           {started && (
-            <button onClick={() => setTextMode((v) => !v)} className={cn("icon-btn", textMode && "bg-lavender")} aria-label="Type an answer" title="Type instead">
+            <button onClick={() => setTextMode((v) => !v)} className={cn("icon-btn", typing && "bg-lavender")} aria-label="Type an answer" title="Type instead">
               <Keyboard size={18} />
             </button>
           )}
@@ -443,13 +687,22 @@ function InterviewRoom() {
             <button onClick={() => begin(true)} disabled={vad.loading && !vad.errored} className="btn-primary w-full disabled:opacity-60" data-testid="start">
               {vad.loading && !vad.errored ? "Preparing microphone…" : resuming ? "Resume interview" : "Start interview"}
             </button>
-            {vad.errored && <p className="mt-3 text-sm text-red-700">Voice detection couldn&apos;t load on this device. You can still type your answers.</p>}
+            {vad.errored && (
+              <p className="mt-3 text-sm text-red-700">
+                Voice detection couldn&apos;t load on this device. You can still type your answers.
+                {debug && <span className="block font-mono text-xs">{String(vad.errored)}</span>}
+              </p>
+            )}
             <button onClick={() => begin(false)} className="mt-3 w-full text-sm font-semibold underline underline-offset-4" data-testid="start-text">
               Continue without a microphone
             </button>
             <label className="mt-4 flex items-center justify-center gap-2 text-xs text-vast/70">
               <input type="checkbox" checked={allowInterrupt} onChange={(e) => setAllowInterrupt(e.target.checked)} />
               Let me interrupt by speaking (turn off if you use speakers and get cut off)
+            </label>
+            <label className="mt-2 flex items-center justify-center gap-2 text-xs text-vast/70">
+              <input type="checkbox" checked={captureMode === "push"} onChange={(e) => setCaptureMode(e.target.checked ? "push" : "auto")} data-testid="lobby-push-to-talk" />
+              Noisy room or other voices nearby: use push-to-talk (hold Space while you answer)
             </label>
           </div>
         </div>

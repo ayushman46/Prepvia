@@ -62,6 +62,15 @@ const server = http.createServer((req, res) => {
       res.writeHead(200, { "Content-Type": "application/json" });
       return res.end(JSON.stringify(stats));
     }
+    if (req.url === "/v1/models") {
+      // Key check used by /api/health; FAKE_STT_INVALID_KEY simulates a revoked key.
+      if (process.env.FAKE_STT_INVALID_KEY) {
+        res.writeHead(401, { "Content-Type": "application/json" });
+        return res.end(JSON.stringify({ error: { message: "Invalid API Key", code: "invalid_api_key" } }));
+      }
+      res.writeHead(200, { "Content-Type": "application/json" });
+      return res.end(JSON.stringify({ data: [{ id: "whisper-large-v3-turbo" }, { id: "llama-3.3-70b-versatile" }] }));
+    }
     if (req.url === "/fail-next-chat") {
       const count = raw.length ? Number(JSON.parse(raw.toString("utf8")).count || 1) : 1;
       stats.failNextChat += count;

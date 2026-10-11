@@ -5,7 +5,7 @@ import { ensureCanvasTask } from "@/server/canvas-task";
 import { config } from "@/server/config";
 import { ApiError, clientIp, jsonError, readJson } from "@/server/http";
 import { logger } from "@/server/logger";
-import { enforceRateLimit } from "@/server/rate-limit";
+import { enforceLocalRateLimit, enforceRateLimit } from "@/server/rate-limit";
 import { acquireTurnLock, finishTurn, isValidSessionId, releaseTurnLock, type SessionDoc, type TurnSessionUpdate } from "@/server/sessions";
 import { MAX_AUDIO_BYTES } from "@/server/stt";
 import { prewarmTts } from "@/server/tts";
@@ -24,6 +24,9 @@ async function parseInput(request: Request): Promise<TurnInput> {
     if (declared > MAX_AUDIO_BYTES) {
       throw new ApiError(413, "audio_too_large", "That answer was too long to process. Please answer in shorter segments.");
     }
+    // Audio turns use speech-to-text too. They are the fallback when speculative
+    // transcription was throttled, so they get their own per-IP budget.
+    enforceLocalRateLimit("stt-turn", clientIp(request), Math.ceil(config.limits.transcriptionsPerIpPerHour / 60), 60);
     return { kind: "audio", audio: new Uint8Array(await request.arrayBuffer()) };
   }
   if (contentType.includes("application/json")) {

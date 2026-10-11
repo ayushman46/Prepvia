@@ -235,6 +235,16 @@ describe("runTurn: audio pipeline", () => {
     expect(providers.tokens).not.toHaveBeenCalled();
   });
 
+  it("tells the candidate to type when speech recognition is unavailable (bad key), and to retry when it is busy", async () => {
+    providers.transcribe.mockRejectedValueOnce(new SttError("401", false, "invalid_key"));
+    let { events } = await run({ kind: "audio", audio: new Uint8Array(100) });
+    expect(events).toEqual([expect.objectContaining({ type: "error", code: "stt_unavailable", retryable: false })]);
+    providers.transcribe.mockRejectedValueOnce(new SttError("429", false, "rate_limited", 2_000));
+    ({ events } = await run({ kind: "audio", audio: new Uint8Array(100) }));
+    expect(events).toEqual([expect.objectContaining({ type: "error", code: "stt_busy", retryable: true })]);
+    expect(store.transcripts).toEqual([]);
+  });
+
   it("reports STT failures without saving anything", async () => {
     store.transcripts = [{ role: "ai", content: "Q?" }];
     providers.transcribe.mockRejectedValue(new SttError("groq down", true));
@@ -515,6 +525,17 @@ describe("withoutLeadingAcknowledgement", () => {
     expect(withoutLeadingAcknowledgement("Got it. What did you measure?")).toBe("What did you measure?");
     expect(withoutLeadingAcknowledgement("Okay so what happened next?")).toBe("Okay so what happened next?");
     expect(withoutLeadingAcknowledgement("Thanks to the outbox table, events were reliable.")).toBe("Thanks to the outbox table, events were reliable.");
+    expect(withoutLeadingAcknowledgement("Go ahead and share that detail about the rollout.", "Go ahead.")).toBe("Share that detail about the rollout.");
+    expect(withoutLeadingAcknowledgement("Go ahead.", "Go ahead.")).toBe("");
+    expect(withoutLeadingAcknowledgement("Going further, what broke first?", "Go ahead.")).toBe("Going further, what broke first?");
+  });
+
+  it("does not repeat the acknowledgement in the next sentence of the same reply", async () => {
+    store.transcripts = [{ role: "ai", content: "What happened during the rollout?" }];
+    providers.tokens.mockImplementation(() => tokens(["Go ahead. ", "Go ahead and share that detail about the rollout. ", "What changed for merchants?"]));
+    const { events } = await run({ kind: "text", text: "Sorry to interrupt, can I add one detail?" }, inProgress(8));
+    const spoken = events.filter((e) => e.type === "ai_sentence").map((e) => (e as { content: string }).content).join(" ");
+    expect(spoken).toBe("Go ahead. Share that detail about the rollout. What changed for merchants?");
   });
 });
 

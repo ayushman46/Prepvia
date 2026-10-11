@@ -69,6 +69,18 @@ function createLimiter(concurrency: number) {
   };
 }
 
+/** What the candidate is told when their spoken answer couldn't be transcribed. */
+export function sttErrorEvent(error: SttError): TurnEvent {
+  if (error.reason === "invalid_key" || error.reason === "not_configured" || error.reason === "model") {
+    // Permanent until the server is fixed: the browser switches to typing.
+    return { type: "error", code: "stt_unavailable", message: "Voice answers aren't available right now, so please type your answer.", retryable: false };
+  }
+  if (error.reason === "rate_limited") {
+    return { type: "error", code: "stt_busy", message: "Speech recognition is busy. Wait a few seconds and say that again, or type it.", retryable: true };
+  }
+  return { type: "error", code: "stt_failed", message: "We couldn't transcribe that answer. Please try saying it again.", retryable: true };
+}
+
 /** True when a transcribed "answer" is mostly the interviewer's own last words. */
 export function isEcho(userText: string, lastAi: string): boolean {
   const words = (text: string) => text.toLowerCase().replace(/[^a-z0-9 ]+/g, " ").split(/\s+/).filter(Boolean);
@@ -150,12 +162,26 @@ export function isAcknowledgement(sentence: string): boolean {
   return text.length <= 24 && !text.includes("?") && text.split(/\s+/).length <= 4 && /[.!]$/.test(text);
 }
 
-/** "Okay, you're suggesting…" right after "Okay." was already spoken → "You're suggesting…". */
-export function withoutLeadingAcknowledgement(sentence: string): string {
-  const match = /^(okay|ok|got it|sure|alright|all right|right|thanks|thank you|understood|no problem)[,.!]\s+(?=\S)/i.exec(sentence);
-  if (!match) return sentence;
-  const rest = sentence.slice(match[0].length);
-  return rest.charAt(0).toUpperCase() + rest.slice(1);
+const words = (text: string) => text.toLowerCase().replace(/[^a-z' ]+/g, " ").trim().split(/\s+/).filter(Boolean);
+const escapeRegExp = (text: string) => text.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+
+/**
+ * Right after an acknowledgement was spoken, drop a repeat of it at the start of
+ * the next sentence: "Okay." + "Okay, you're suggesting…" → "You're suggesting…",
+ * "Go ahead." + "Go ahead and share…" → "Share…". Returns "" when the sentence is
+ * nothing but the repeat.
+ */
+export function withoutLeadingAcknowledgement(sentence: string, spokenAck?: string | null): string {
+  if (spokenAck && words(sentence).join(" ") === words(spokenAck).join(" ")) return "";
+  let rest = sentence;
+  const listed = /^(okay|ok|got it|sure|alright|all right|right|thanks|thank you|understood|no problem|go ahead)[,.!]\s+(?=\S)/i.exec(rest);
+  if (listed) {
+    rest = rest.slice(listed[0].length);
+  } else if (spokenAck && words(spokenAck).length) {
+    const repeat = new RegExp(`^${words(spokenAck).map(escapeRegExp).join("[\\s,]+")}[\\s,.!]*(?:(?:and|so)\\s+)?(?=\\S)`, "i").exec(rest);
+    if (repeat) rest = rest.slice(repeat[0].length);
+  }
+  return rest === sentence ? sentence : rest.charAt(0).toUpperCase() + rest.slice(1);
 }
 
 async function* guardedSentences(
@@ -181,6 +207,7 @@ async function* guardedSentences(
 ): AsyncGenerator<string> {
   let note = "";
   let acknowledged = false;
+  let ackText: string | null = null;
   // Everything said aloud so far in this reply, across attempts.
   const spoken: string[] = [];
   let released = false;
@@ -220,14 +247,16 @@ async function* guardedSentences(
         first = false;
         if (!acknowledged) {
           acknowledged = true;
+          ackText = next.value;
           spoken.push(next.value);
           yield next.value;
         }
         continue;
       }
-      // A regenerated draft must not acknowledge again ("Okay. Okay, …").
-      const sentence = first && acknowledged ? withoutLeadingAcknowledgement(next.value) : next.value;
+      // The sentence after a spoken acknowledgement must not repeat it ("Go ahead. Go ahead and…").
+      const sentence = acknowledged && held.length === 0 ? withoutLeadingAcknowledgement(next.value, ackText) : next.value;
       first = false;
+      if (!sentence) continue;
       held.push(sentence);
       hooks.onHeld?.(sentence);
     }
@@ -333,15 +362,8 @@ export async function runTurn(
     } catch (error) {
       await historyPromise.catch(() => undefined);
       if (error instanceof SttError) {
-        logger.error("Transcription failed", error, { sessionId });
-        emit({
-          type: "error",
-          code: "stt_failed",
-          message: error.retryable
-            ? "We couldn't transcribe that answer. Please try saying it again."
-            : "Speech recognition is unavailable right now. You can type your answer instead.",
-          retryable: error.retryable,
-        });
+        logger.error("Transcription failed", error, { sessionId, reason: error.reason });
+        emit(sttErrorEvent(error));
         return result;
       }
       throw error;

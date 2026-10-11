@@ -88,3 +88,139 @@ describe("UtteranceTracker", () => {
     expect(tracker.takeEndedSpeculation()).not.toBeNull();
   });
 });
+
+describe("UtteranceTracker noise gate", () => {
+  const GATE = { confidentThreshold: 0.8, minConfidentFrames: 8, minConfidentRun: 4, minSnrDb: 9, minSpeechRms: 0.006 };
+  /** Feed `count` frames with speech probability `p` at loudness `level` (RMS). */
+  const feedAt = (tracker: UtteranceTracker, p: number, level: number, count: number) => {
+    for (let i = 0; i < count; i++) tracker.frame(p, frame(level));
+  };
+
+  it("rejects speech-like sound that is barely above the room noise (distant voices)", () => {
+    const { tracker, onSpeculate } = makeTracker({ gate: GATE, speculateAfterMs: 350 });
+    feedAt(tracker, 0.05, 0.01, 60); // room at RMS 0.01
+    feedAt(tracker, 0.9, 0.02, 20); // "speech" only +6 dB above it
+    feedAt(tracker, 0.05, 0.01, 25);
+    expect(onSpeculate).not.toHaveBeenCalled();
+    expect(tracker.takeEnded()).toMatchObject({ accepted: false, reason: "quiet", speculationId: null });
+  });
+
+  it("accepts close speech well above the room noise, and speculates on it", () => {
+    const { tracker, onSpeculate } = makeTracker({ gate: GATE, speculateAfterMs: 350 });
+    feedAt(tracker, 0.05, 0.01, 60);
+    feedAt(tracker, 0.9, 0.08, 20); // +18 dB
+    feedAt(tracker, 0.05, 0.01, 25);
+    expect(onSpeculate).toHaveBeenCalledTimes(1);
+    const verdict = tracker.takeEnded();
+    expect(verdict).toMatchObject({ accepted: true, reason: "ok", speculationId: onSpeculate.mock.calls[0][1] });
+    expect(verdict?.samples).toBe((9 + 20 + 25) * 512);
+  });
+
+  it("rejects scattered spikes (clicks, coughs) that never form a run of confident speech", () => {
+    const { tracker, onSpeculate } = makeTracker({ gate: GATE, speculateAfterMs: 350 });
+    feedAt(tracker, 0.05, 0.003, 30);
+    for (let i = 0; i < 12; i++) {
+      feedAt(tracker, 0.95, 0.1, 1);
+      feedAt(tracker, 0.4, 0.004, 2);
+    }
+    feedAt(tracker, 0.05, 0.003, 25);
+    expect(onSpeculate).not.toHaveBeenCalled();
+    expect(tracker.takeEnded()).toMatchObject({ accepted: false, reason: "short" });
+  });
+
+  it("raises the noise floor slowly in a loud room and lowers it quickly when it quietens", () => {
+    const { tracker } = makeTracker({ gate: GATE });
+    feedAt(tracker, 0.1, 0.04, 20);
+    expect(tracker.noiseFloorRms).toBeLessThan(0.015); // a burst of noise barely moves it
+    feedAt(tracker, 0.1, 0.04, 180);
+    expect(tracker.noiseFloorRms).toBeGreaterThan(0.03);
+    expect(tracker.noiseFloorRms).toBeLessThanOrEqual(0.045);
+    feedAt(tracker, 0.9, 0.06, 20); // not clearly above the loud room
+    feedAt(tracker, 0.1, 0.04, 25);
+    expect(tracker.takeEnded()?.accepted).toBe(false);
+    feedAt(tracker, 0.1, 0.003, 40);
+    expect(tracker.noiseFloorRms).toBeLessThan(0.006);
+    feedAt(tracker, 0.9, 0.03, 20);
+    feedAt(tracker, 0.1, 0.003, 25);
+    expect(tracker.takeEnded()?.accepted).toBe(true);
+  });
+
+  it("only counts speech while the candidate has the floor", () => {
+    let accepting = false;
+    const { tracker } = makeTracker({ gate: GATE, isAccepting: () => accepting });
+    feedAt(tracker, 0.05, 0.003, 30);
+    feedAt(tracker, 0.95, 0.08, 30); // e.g. echo of the interviewer, before the floor opens
+    accepting = true;
+    feedAt(tracker, 0.05, 0.003, 25);
+    expect(tracker.takeEnded()?.accepted).toBe(false);
+    feedAt(tracker, 0.95, 0.08, 30); // the candidate talks after the floor opened
+    feedAt(tracker, 0.05, 0.003, 25);
+    expect(tracker.takeEnded()?.accepted).toBe(true);
+  });
+
+  it("cancels superseded speculations and caps how many it starts per minute", () => {
+    const onCancelSpeculation = vi.fn();
+    const { tracker, onSpeculate } = makeTracker({ gate: GATE, speculateAfterMs: 350, onCancelSpeculation, maxSpeculationsPerMinute: 2 });
+    feedAt(tracker, 0.05, 0.003, 30);
+    feedAt(tracker, 0.95, 0.08, 20);
+    feedAt(tracker, 0.05, 0.003, 12); // speculation #1
+    feedAt(tracker, 0.95, 0.08, 10); // resumed: #1 cancelled
+    expect(onCancelSpeculation).toHaveBeenCalledWith(onSpeculate.mock.calls[0][1]);
+    feedAt(tracker, 0.05, 0.003, 25); // speculation #2, then the end
+    feedAt(tracker, 0.95, 0.08, 20);
+    expect(tracker.takeEnded()).toMatchObject({ accepted: true, speculationId: onSpeculate.mock.calls[1][1] }); // #2 handed over
+    feedAt(tracker, 0.95, 0.08, 20);
+    feedAt(tracker, 0.05, 0.003, 25); // budget used up: no third speculation
+    expect(onSpeculate).toHaveBeenCalledTimes(2);
+    expect(onCancelSpeculation).toHaveBeenCalledTimes(1);
+    expect(tracker.takeEnded()).toMatchObject({ accepted: true, speculationId: null });
+    feedAt(tracker, 0.05, 0.003, 1875); // a minute later the budget is available again
+    feedAt(tracker, 0.95, 0.08, 20);
+    feedAt(tracker, 0.05, 0.003, 25);
+    expect(onSpeculate).toHaveBeenCalledTimes(3);
+  });
+
+  it("reports speech heard while the candidate didn't have the floor (so it can be flagged, not answered)", () => {
+    const { tracker } = makeTracker({ gate: GATE, isAccepting: () => false });
+    feedAt(tracker, 0.05, 0.003, 30);
+    feedAt(tracker, 0.95, 0.08, 30);
+    feedAt(tracker, 0.05, 0.003, 25);
+    expect(tracker.takeEnded()).toMatchObject({ accepted: false, heard: true });
+    feedAt(tracker, 0.95, 0.008, 30); // faint: neither accepted nor heard
+    feedAt(tracker, 0.05, 0.003, 25);
+    expect(tracker.takeEnded()).toMatchObject({ accepted: false, heard: false });
+  });
+
+  it("credits speech spoken just before a barge-in handed over the floor", () => {
+    let accepting = false;
+    const { tracker } = makeTracker({ gate: GATE, isAccepting: () => accepting });
+    feedAt(tracker, 0.05, 0.003, 30);
+    feedAt(tracker, 0.95, 0.08, 9); // "Sorry—" over the interviewer: barge-in fires
+    tracker.claimFloor();
+    accepting = true;
+    feedAt(tracker, 0.05, 0.003, 25); // the candidate stops right away
+    expect(tracker.takeEnded()?.accepted).toBe(true);
+  });
+
+  it("cancelling a speculation keeps segmentation in step with the VAD", () => {
+    const onCancelSpeculation = vi.fn();
+    const { tracker, onSpeculate } = makeTracker({ gate: GATE, speculateAfterMs: 350, onCancelSpeculation });
+    feedAt(tracker, 0.95, 0.08, 20);
+    feedAt(tracker, 0.05, 0.003, 12); // speculation #1
+    tracker.cancelPendingSpeculation(); // e.g. push-to-talk pressed
+    expect(onCancelSpeculation).toHaveBeenCalledWith(onSpeculate.mock.calls[0][1]);
+    feedAt(tracker, 0.05, 0.003, 13); // the VAD still ends the utterance on schedule
+    expect(tracker.takeEnded()).toMatchObject({ accepted: true, speculationId: null, samples: (20 + 25) * 512 });
+  });
+
+  it("reset() abandons the utterance in progress and its speculation", () => {
+    const onCancelSpeculation = vi.fn();
+    const { tracker, onSpeculate } = makeTracker({ gate: GATE, speculateAfterMs: 350, onCancelSpeculation });
+    feedAt(tracker, 0.95, 0.08, 20);
+    feedAt(tracker, 0.05, 0.003, 12);
+    tracker.reset();
+    expect(onCancelSpeculation).toHaveBeenCalledWith(onSpeculate.mock.calls[0][1]);
+    feedAt(tracker, 0.05, 0.003, 30);
+    expect(tracker.takeEnded()).toBeNull();
+  });
+});

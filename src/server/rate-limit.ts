@@ -55,10 +55,11 @@ export function enforceLocalRateLimit(bucket: string, identifier: string, limit:
     localWindows.set(key, { count: 1, resetAt: now + windowSeconds * 1000 });
     return;
   }
-  entry.count += 1;
-  if (entry.count > limit) {
+  // Rejected requests don't count, so a burst can't extend its own lockout.
+  if (entry.count >= limit) {
     throw new ApiError(429, "rate_limited", "You're doing that too often. Please wait a moment.", {
       "Retry-After": String(Math.ceil((entry.resetAt - now) / 1000)),
     });
   }
+  entry.count += 1;
 }

@@ -51,6 +51,10 @@ type State = {
   startedAt: number | null;
   canvas: CanvasState;
   latency: TurnLatency[];
+  /** Speech-to-text can't work on this server (e.g. invalid key): answers must be typed. */
+  voiceUnavailable: boolean;
+  /** Spoken "answers" that turned out to contain no speech (background noise). */
+  noSpeechCount: number;
 };
 
 type Action =
@@ -70,7 +74,9 @@ type Action =
   | { type: "caption"; value: string }
   | { type: "started"; at: number }
   | { type: "canvas"; patch: Partial<CanvasState> }
-  | { type: "latency"; record: TurnLatency };
+  | { type: "latency"; record: TurnLatency }
+  | { type: "voice_unavailable" }
+  | { type: "no_speech" };
 
 const initialState: State = {
   loadState: "loading",
@@ -90,6 +96,8 @@ const initialState: State = {
   startedAt: null,
   canvas: { task: null, content: "", language: "text", saving: false },
   latency: [],
+  voiceUnavailable: false,
+  noSpeechCount: 0,
 };
 
 let idCounter = 0;
@@ -155,6 +163,10 @@ function reducer(state: State, action: Action): State {
       return { ...state, started: true, startedAt: state.startedAt ?? action.at };
     case "canvas":
       return { ...state, canvas: { ...state.canvas, ...action.patch } };
+    case "voice_unavailable":
+      return { ...state, voiceUnavailable: true };
+    case "no_speech":
+      return { ...state, noSpeechCount: state.noSpeechCount + 1 };
     case "latency": {
       const others = state.latency.filter((r) => r.turn !== action.record.turn);
       return { ...state, latency: [...others, action.record].sort((a, b) => a.turn - b.turn) };
@@ -315,6 +327,7 @@ export function useInterview(sessionId: string) {
 
   const sendTurn = useCallback(
     async (payload: TurnPayload, options: { inputAt?: number } = {}): Promise<boolean> => {
+      if ("audio" in payload && stateRef.current.voiceUnavailable) return false;
       if (busyRef.current) {
         // A turn is still finishing (e.g. the candidate barged in while the reply
         // was streaming): queue this answer and send it as soon as the lock frees.
@@ -322,6 +335,24 @@ export function useInterview(sessionId: string) {
         return false;
       }
       busyRef.current = true;
+      if ("audio" in payload && payload.transcript) {
+        // Hold the floor while the speculative transcript settles (it usually already
+        // has, during the end-of-turn pause). Empty means Whisper heard no speech:
+        // don't start a turn (no bubble, no second transcription of the same noise).
+        dispatch({ type: "processing", value: true });
+        const speculative = await payload.transcript.catch(() => null);
+        if (speculative && (speculative.echo || !speculative.text.trim())) {
+          dispatch({ type: "processing", value: false });
+          busyRef.current = false;
+          dispatch({ type: "no_speech" });
+          const seconds = (payload.audio.size - 44) / 32_000;
+          if (seconds >= 2 && !speculative.echo) flashNotice("Didn't catch that. Please try again.");
+          const queued = pendingTurnRef.current;
+          pendingTurnRef.current = null;
+          if (queued) setTimeout(() => void sendTurnRef.current?.(queued.payload, queued.options), 0);
+          return true;
+        }
+      }
       dispatch({ type: "interrupted", value: false });
       const inputAt = options.inputAt ?? performance.now();
       dispatch({ type: "error", error: null });
@@ -360,6 +391,7 @@ export function useInterview(sessionId: string) {
           case "no_speech":
             if (userMessageId) dispatch({ type: "remove_message", id: userMessageId });
             userMessageId = null;
+            dispatch({ type: "no_speech" });
             flashNotice("Didn't catch that. Please try again.");
             break;
           case "ai_start": {
@@ -407,14 +439,16 @@ export function useInterview(sessionId: string) {
             break;
           case "error":
             failed = true;
+            if (event.code === "stt_unavailable") dispatch({ type: "voice_unavailable" });
             dispatch({
               type: "error",
               error: {
                 message: event.message,
-                retryable: event.retryable,
-                // LLM failures happen after the answer is saved, so retrying continues
-                // the turn; transcription failures need the candidate to answer again.
-                retryContinues: event.code !== "stt_failed",
+                // Speech-to-text errors mean "say it again": nothing was saved, so a
+                // Retry button would have nothing to resend.
+                retryable: event.code.startsWith("stt_") ? false : event.retryable,
+                // LLM failures happen after the answer is saved, so retrying continues the turn.
+                retryContinues: !event.code.startsWith("stt_"),
               },
             });
             break;
@@ -523,10 +557,14 @@ export function useInterview(sessionId: string) {
   // server is still generating and synthesizing later sentences.
   const turnStatus: TurnStatus = state.interrupted ? "ready" : state.speaking ? "speaking" : state.processing ? "processing" : "ready";
 
+  const markVoiceUnavailable = useCallback(() => dispatch({ type: "voice_unavailable" }), []);
+
   return {
     ...state,
     turnStatus,
     sendTurn,
+    flashNotice,
+    markVoiceUnavailable,
     begin,
     interrupt,
     stopAudio,

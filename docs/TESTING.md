@@ -8,9 +8,10 @@ This document records every test suite, benchmark, and measurement taken while r
 
 | Suite | What runs for real | Result |
 |---|---|---|
-| Unit tests (`npm test`) | Pure logic + orchestration with mocked I/O | **141 / 141 pass** |
+| Unit tests (`npm test`) | Pure logic + orchestration with mocked I/O | **161 / 161 pass** |
 | API end-to-end (`npm run test:e2e`) | Production server, MongoDB Atlas, Microsoft Edge TTS; LLM/STT simulated | **29 / 29 pass** |
-| Live browser (`npm run test:live-browser`) | Chromium, Silero VAD, NVIDIA LLM, Edge TTS, MongoDB, Web Audio playback (STT simulated) | **19 / 19 pass** in each of the last 3 runs, the last on the final build (earlier runs today: 18/19 during an NVIDIA incident, and 17/19 twice from bugs 36 and 37, both fixed) |
+| Live browser (`npm run test:live-browser`) | Chromium, Silero VAD, NVIDIA LLM, Edge TTS, MongoDB, Web Audio playback (STT simulated) | **21 / 21 pass** on the voice-input fix (adds push-to-talk and microphone-reconnect steps; earlier: 19 / 19 three runs in a row) |
+| Real microphone (`npm run test:real-mic`) | The Mac's built-in microphone and speakers, Chromium and Brave, `next start` and `next dev` | Voice works under `next dev` (was disabled); background voices send nothing; an invalid key switches to typing after one request (see [real microphone](#real-microphone-live-voice-input)) |
 | Load (`tests/load/run.mjs`) | 30 concurrent candidates with real Edge TTS; 50 without TTS | **0 errors, 0 5xx, consistent data** |
 | Interview quality (`npm run test:quality`) | 5 LLM-simulated candidate personas vs the real interviewer, LLM judge | **4.78 / 5** mean judge score on the final build (4.86 on the previous one); strong vs vague candidate reports 78 vs 28 ([§6](#6-interview-quality-evaluation)) |
 | Edge TTS live (`npm run test:live`) | Real Edge TTS socket pool | **4 / 4 pass** |
@@ -58,6 +59,30 @@ This document records every test suite, benchmark, and measurement taken while r
 | **Final build (closing, pacing and resilience fixes; 5 runs)** | **1,636–2,271 ms, median 1,882 ms** | **366–469 ms** | **175–308 ms** |
 
 Run-to-run variation is dominated by NVIDIA's time-to-first-token (450–870 ms across runs).
+
+### Real microphone (live voice input)
+
+**Why.** A user reported "when I speak, nothing is detected". Every suite above feeds a programmable fake microphone, so `tests/live-browser/real-mic.mjs` was written to test the real thing: a visible browser on the MacBook Air's built-in microphone, answers spoken out loud through its speakers with macOS `say`, and the app's own debug counters read back.
+
+**What it found** (MacBook Air, macOS input volume 27 / 100, Chromium and Brave):
+
+- **Capture and voice detection work.** Silero's speech probability reached 0.99–1.00 for every spoken sentence, from 100 % down to 12 % speaker volume, in both Chromium and Brave. Chrome's automatic gain control compensates for the low input volume.
+- **Under `npm run dev` voice was disabled before the interview started** (bug 41): the lobby said "Voice detection couldn't load" and the detector processed no frames. Production builds were unaffected, which is why every earlier suite passed.
+- **The local Groq key is invalid (HTTP 401).** Every spoken answer failed, and the app kept sending audio: about 25 failing requests in one run, until its own rate limit answered 429 (bugs 43, 44). `/api/health` still said speech-to-text was "configured".
+- **The room was not quiet.** During a 15 s "silent" stretch, 60 % of frames (282 of 469) were confident speech, and louder (median RMS 0.048) than the test voice at full volume (0.023): people talking near the laptop. Background voices produced 8 transcription calls and 2 turns in 10 s, which kept the app busy so real answers were dropped (bugs 45–47).
+
+**After the fixes** (bugs 41–52):
+
+| Check | Before | After |
+|---|---|---|
+| Voice under `next dev` | disabled ("couldn't load") | works: 100 %–12 % volume detected and sent |
+| Requests from 10 s of room sound (hands-free) | 8 transcriptions + 2 turns | 0 in each later run |
+| Transcriptions per spoken answer | 3–4 | 1 |
+| Invalid Groq key | ~25 failing requests, then 429 | 1 request, then the app switches to typing with an explanation; `/api/health` reports `"stt": "invalid_key"` |
+| Push-to-talk (hold Space) with voices in the room | (did not exist) | both answers sent with the right text; 0 requests from background sound |
+| Full hands-free answer (stub transcript) | – | bubble with the spoken text, interviewer reply, back to "Your turn" |
+
+Speech that only *resembles* the candidate's (loud voices next to the laptop) can't be told apart acoustically; push-to-talk is the answer there, and the room suggests it after repeated background-noise events.
 
 ---
 
@@ -226,6 +251,18 @@ Deterministic checks across rounds: filler-praise openers **22 % → 0 %**; stac
 | 38 | quality eval (final) | The repeat check compared a new reply only with the *start* of earlier replies, so a question asked again after a different preamble got through (the pm interviewer asked one question three times) | New text is compared with every part of earlier replies, and each question in a reply is checked, not only the opening |
 | 39 | quality eval (final) | Only a reply's opening was checked, so "That's all the time we have for this section. You can now press End interview" in a third sentence was spoken, and the candidate ended the interview at minute 10 of 15 | Every sentence is checked before it is spoken; a later sentence that wraps up early or re-asks a question is dropped and the reply continues with a new question |
 | 40 | live browser | After a rejected draft whose acknowledgement was already spoken, the new draft could open with another one ("Okay. Okay, you're suggesting…") | A regenerated draft's leading acknowledgement is dropped when one was already spoken |
+| 41 | real microphone | Under `next dev` (React StrictMode) vad-react destroyed a never-started detector, whose `destroy()` throws; the error disabled voice for the whole session | The app drives the detector directly with a StrictMode-safe lifecycle |
+| 42 | real microphone | A failed microphone start (permission, device busy) left the detector permanently errored, with one generic "blocked" message and no way back without reloading | Specific messages per cause (denied, blocked by macOS, not found, busy, insecure origin) and "Try the microphone again", which builds a fresh detector |
+| 43 | real microphone | An invalid Groq key failed every spoken answer while the app kept sending audio and told the candidate to "type" without switching | After one `stt_unavailable` the room stops listening, switches to typing and says why; the server remembers the bad key and stops calling Groq |
+| 44 | real microphone | `/api/health` reported speech-to-text "configured" for a key Groq rejects | A cached `GET /models` check reports `invalid_key`, `rate_limited`, `model_unavailable` or `unreachable` |
+| 45 | real microphone | Any sound scored as speech for 224 ms in total became an answer (no loudness or confidence check) | Noise gate: 256 ms of confident speech, 128 ms unbroken, 9 dB above an adaptive room-noise floor |
+| 46 | real microphone | Speculative transcription fired on every pause and was never cancelled; an empty (noise) transcript was then transcribed again through the turn | Only gated utterances speculate, superseded ones are aborted, at most 8 per minute with back-off after a 429; an empty transcript never becomes a turn |
+| 47 | real microphone | Loud voices near the laptop are indistinguishable from the candidate | Push-to-talk mode (hold Space or the on-screen button), offered automatically after repeated background-noise events |
+| 48 | code review | A microphone that disconnected, stalled or went silent mid-interview was never noticed | Track `ended`/`mute` and device changes restart capture automatically; a watchdog shows "Restart microphone" for dead, muted or silent input |
+| 49 | code review | Groq 429s were retried immediately, 400s looked like outages, and the speculative and audio-turn paths shared one per-IP budget | Errors classified (`stt_unavailable`, `stt_busy`, `stt_failed`); rate limits honour Retry-After; only undecodable clips count as "nothing heard"; audio turns have their own budget |
+| 50 | code review | Whisper noise outputs such as "Thank you. Thank you.", "[Music]" or "Bye bye." were saved as answers | Normalized, sentence-level hallucination filter that keeps real short answers ("Yes.", "Okay.") |
+| 51 | adversarial review | Overlapping microphone restarts could wire two live streams into the detector; a recovered detector leaked on unmount | Start, pause and restart run one at a time; restarts coalesce; every detector and stream is released on unmount |
+| 52 | adversarial review | Push-to-talk edge cases: no length cap (413 after ~131 s), taps sent as answers, a re-press during the tail was lost, Space hijacked focused buttons | 2-minute cap with auto-send, minimum hold length, re-press support, Space left to focused controls |
 
 ---
 
@@ -243,9 +280,9 @@ Deterministic checks across rounds: filler-praise openers **22 % → 0 %**; stac
 
 ## 9. Known limitations
 
-- **Real speech-to-text is untested here.** The local Groq key was rejected, so live tests simulate STT (450 ms). Set a valid `GROQ_API_KEY` and re-run `npm run test:live-browser` with `GROQ_API_KEY_LIVE` set to verify.
+- **Real speech-to-text is untested here.** The local Groq key was rejected, so live tests simulate STT (450 ms). Set a valid `GROQ_API_KEY` and re-run `npm run test:live-browser` with `GROQ_API_KEY_LIVE` set, and `npm run test:real-mic`, to verify.
 - **Not measured from Vercel.** All latency numbers are from a local production build talking to Atlas (Mumbai), NVIDIA, and Edge TTS from India.
-- **No real microphone or speakers.** Echo cancellation with laptop speakers is untested; the speaker-echo filter and the "let me interrupt by speaking" toggle exist for that case.
+- **Real microphone tested on one Mac only.** The built-in microphone and speakers of one MacBook Air, in Chromium and Brave. Windows, Safari, Firefox, phones and Bluetooth headsets are untested; the device-change and error handling are exercised by the fake-microphone suite.
 - **Quality is LLM-judged**, not rated by humans; the simulated candidates are approximations.
 
 ## 10. Reproducing these results
@@ -256,6 +293,7 @@ npm run check                                   # typecheck + lint + unit tests
 npm run test:e2e                                # needs MONGODB_URI
 npm run test:live                               # Edge TTS against the real service
 npm run test:live-browser                       # needs NVIDIA_API_KEY + MONGODB_URI (macOS `say` for fixtures)
+npm run test:real-mic -- --stt=fake             # real microphone + speakers (macOS); see the script header for modes
 npm run test:quality                            # needs NVIDIA_API_KEY + MONGODB_URI (~20 min)
 node tests/load/run.mjs --users=30 --turns=6 --tts=on
 ```

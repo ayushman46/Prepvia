@@ -16,6 +16,7 @@
     "check": "npm run typecheck && npm run lint && npm run test",
     "test:e2e": "node tests/e2e/index.mjs",
     "test:live-browser": "node tests/live-browser/run.mjs",
+    "test:real-mic": "node tests/live-browser/real-mic.mjs",
     "test:quality": "node tests/quality/eval.mjs"
   },
   "dependencies": {
@@ -27,7 +28,6 @@
     "@codemirror/lang-sql": "^6.10.0",
     "@codemirror/state": "^6.7.6",
     "@codemirror/view": "^6.43.14",
-    "@ricky0123/vad-react": "^0.0.36",
     "@ricky0123/vad-web": "^0.0.30",
     "@uiw/react-codemirror": "^4.25.12",
     "@vercel/functions": "^3.9.11",

@@ -32,6 +32,15 @@
     if (mic.ctx.state === "suspended") await mic.ctx.resume();
     // A fresh destination per call: the VAD stops tracks when muted and asks again on unmute.
     mic.dest = mic.ctx.createMediaStreamDestination();
+    // A real microphone always carries a faint noise floor (pure digital silence means a dead input).
+    const noise = mic.ctx.createBuffer(1, mic.ctx.sampleRate, mic.ctx.sampleRate);
+    const samples = noise.getChannelData(0);
+    for (let i = 0; i < samples.length; i++) samples[i] = (Math.random() * 2 - 1) * 0.002;
+    const hiss = mic.ctx.createBufferSource();
+    hiss.buffer = noise;
+    hiss.loop = true;
+    hiss.connect(mic.dest);
+    originalStart.call(hiss, 0);
     return mic.dest.stream;
   };
 
