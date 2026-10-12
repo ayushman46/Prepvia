@@ -155,6 +155,20 @@ function InterviewRoom() {
     // Once dismissed, the hint stays away for a few minutes.
     if (noiseEvents.current.length >= NOISY_ROOM_EVENTS && now - noisyDismissedAt.current > 5 * 60_000) setNoisyRoom(true);
   };
+  /** Attempts to answer that never reached Aria (misfires on audible sound, gate rejections). */
+  const lostAttempts = useRef<number[]>([]);
+  /** performance.now() of the last frame clearly above the room's noise floor. */
+  const lastLoudAt = useRef(-Infinity);
+  const noteLostAttempt = () => {
+    const now = performance.now();
+    lostAttempts.current = [...lostAttempts.current.filter((t) => now - t < 30_000), now];
+    const lost = lostAttempts.current.length;
+    if (lost >= 3 && now - noisyDismissedAt.current > 5 * 60_000) {
+      setNoisyRoom(true);
+    } else if (lost >= 2) {
+      hint("unclear", "I can hear sound but not clear speech — try speaking a little closer, or hold Space / the button to talk.", 30_000);
+    }
+  };
   const dismissNoisy = () => {
     noisyDismissedAt.current = performance.now();
     noiseEvents.current = [];
@@ -209,7 +223,15 @@ function InterviewRoom() {
         logVad("rejected", { reason, started });
         if (!started) return; // the lobby microphone check
         noteNoise();
-        if (reason === "quiet") hint("faint", "I can hear you only faintly. Move closer to the microphone or reduce background noise.", 20_000);
+        noteLostAttempt();
+        if (reason === "quiet") hint("faint", "I can only just hear you — try moving a little closer to the mic.", 20_000);
+      },
+      onMisfire: () => {
+        const loud = performance.now() - lastLoudAt.current < 1_500;
+        logVad("misfire", { loud, turnStatus });
+        // Only a sound the meter showed counts: a click or a cough shouldn't nag.
+        if (!started || !loud) return;
+        noteLostAttempt();
       },
       onHoldLimit: () => {
         hint("hold-limit", "Answers are limited to 2 minutes, so I've sent what you said so far.", 10_000);
@@ -231,6 +253,8 @@ function InterviewRoom() {
       },
       onFrame: (probability: number, level: number, rms: number, noiseFloor: number) => {
         micLevel.current = level;
+        // ~18 dB over the room floor: the meter visibly moved for this.
+        if (rms > Math.max(0.02, noiseFloor * 8)) lastLoudAt.current = performance.now();
         if (debug) {
           const w = window as unknown as { __vadProbs?: { t: number; p: number; rms: number; floor: number }[] };
           (w.__vadProbs ??= []).push({ t: performance.now(), p: probability, rms, floor: noiseFloor });
