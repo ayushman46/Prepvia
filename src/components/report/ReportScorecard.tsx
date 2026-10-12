@@ -201,7 +201,7 @@ function Header({ report, session }: { report: ReadyReport; session: SessionView
               <CitedText text={report.summary} />
             </p>
           ) : (
-            <p className="mt-5 text-vast/75">We couldn't write an overall summary for this one, but the scores and feedback below still apply.</p>
+            <p className="mt-5 text-vast/75">We couldn&apos;t write an overall summary for this one, but the scores and feedback below still apply.</p>
           )}
           {meta?.limited_evidence && (
             <p className="mt-5 flex items-start gap-3 rounded-2xl border-2 border-ember bg-ember/15 p-4 text-left text-sm leading-relaxed">
@@ -311,7 +311,7 @@ function CompetencyCard({ competency, index }: { competency: CompetencyScore; in
           <CitedText text={competency.rationale} />
         </p>
       ) : (
-        <p className="mb-3 text-sm text-vast/75">The reviewer didn't explain this score.</p>
+        <p className="mb-3 text-sm text-vast/75">The reviewer didn&apos;t explain this score.</p>
       )}
       {competency.evidence.length > 0 && (
         <div className="mb-3">
@@ -363,7 +363,7 @@ function Scorecard({ competencies, handsOn }: { competencies: CompetencyScore[];
         Scorecard
       </SectionHeading>
       {competencies.length === 0 ? (
-        <p className="text-vast/75">There wasn't enough in this interview to score any competency. A few fuller answers next time will fill this in.</p>
+        <p className="text-vast/75">There wasn&apos;t enough in this interview to score any competency. A few fuller answers next time will fill this in.</p>
       ) : (
         <>
           <ul className="mb-8 space-y-3 break-inside-avoid" aria-label="Competency overview">

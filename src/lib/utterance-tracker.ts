@@ -42,7 +42,7 @@ export type GateOptions = {
     minSnrDb: number;
     /**
      * Guard: loud, near-voice utterances must also contain this many loud frames
-     * that are at least `strongProbability` speech (defaults 3 at 0.6), so a
+     * that are at least `strongProbability` speech (defaults 3 at 0.5), so a
      * sustained loud sound Silero is unsure about (fan gust, chair scrape) fails.
      */
     minStrongFrames?: number;
@@ -357,7 +357,9 @@ export class UtteranceTracker {
     const near = !!gate.nearVoice && probability >= gate.nearVoice.minProbability && snr >= gate.nearVoice.minSnrDb;
     const speech = probability >= gate.confidentThreshold || near;
     const loud = this.isLoud(db);
-    const strong = probability >= (gate.nearVoice?.strongProbability ?? 0.6);
+    // 0.5, not 0.6: a real candidate's answer had only 2 frames at 0.6 but 5 at 0.5
+    // (tests/vad-trace-replay.test.ts); the noises this guards against stay below 0.5.
+    const strong = probability >= (gate.nearVoice?.strongProbability ?? 0.5);
     if (speech && loud) {
       this.heardFrames++;
       if (strong) this.heardStrongFrames++;
