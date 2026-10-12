@@ -72,6 +72,7 @@ describe("real user trace replay (listen-2026-10-12T13-48-15)", () => {
       gate: { ...SETTINGS.gate, nearVoice: undefined },
     } as unknown as typeof SETTINGS;
     const lost = attempts.filter((a) => !replay(a, old).some((v) => v.accepted)).map((a) => a.atS);
-    expect(lost.length).toBeGreaterThan(0);
+    // Same three the live run lost (rejected "short" at 11 s; no utterance at 37 s and 40.3 s).
+    expect(lost).toEqual([11, 37, 40.3]);
   });
 });
