@@ -122,6 +122,15 @@
   body {
     background: #ffffff !important;
   }
+  /* Light, compact cards on paper instead of heavy cream panels with thick black borders. */
+  .card {
+    background: #ffffff !important;
+    border-width: 1px !important;
+    border-color: rgba(26, 26, 26, 0.25) !important;
+    border-radius: 16px !important;
+    padding: 20px !important;
+    margin-bottom: 14px !important;
+  }
   *,
   *::before,
   *::after {

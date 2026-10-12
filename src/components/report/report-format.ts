@@ -7,11 +7,16 @@ import type { InterviewLevel, InterviewType } from "@/lib/protocol";
 
 export type Tone = { label: string; text: string; ring: string; bar: string };
 
-/** Overall 0-100 bands; 75 ≈ a competency mean of 4 (strong), 50 ≈ 3 (meets the bar). */
+/**
+ * The overall 0-100 score in the words of the 1-5 rubric (0 → 1, 50 → 3, 100 → 5), so the
+ * hero verdict never contradicts the competency labels. Colours use rubricBar's cut points.
+ */
 export function scoreTone(score: number): Tone {
-  if (score >= 75) return { label: "Strong", text: "text-forest", ring: "#034f46", bar: "bg-forest" };
-  if (score >= 50) return { label: "Developing", text: "text-[#9a5b00]", ring: "#ffa946", bar: "bg-ember" };
-  return { label: "Needs practice", text: "text-red-700", ring: "#b91c1c", bar: "bg-red-700" };
+  const rubric = 1 + Math.max(0, Math.min(100, score)) / 25;
+  const label = rubricLabel(rubric);
+  if (rubric >= 3.5) return { label, text: "text-forest", ring: "#034f46", bar: "bg-forest" };
+  if (rubric >= 2.5) return { label, text: "text-[#9a5b00]", ring: "#ffa946", bar: "bg-ember" };
+  return { label, text: "text-red-700", ring: "#b91c1c", bar: "bg-red-700" };
 }
 
 /** The 1-5 rubric in words. */
@@ -69,7 +74,7 @@ export function generationStep(elapsedMs: number): number {
 }
 
 const STEP_DETAILS = [
-  "Going through every answer you gave.",
+  "Going through every answer you gave. This usually takes one to two minutes.",
   "Rating each competency against the rubric, with evidence.",
   "Writing feedback and tips for each question.",
 ];
