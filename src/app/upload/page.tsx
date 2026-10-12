@@ -32,11 +32,11 @@ export default function UploadPage() {
     if (!file || isUploading) return;
     setError(null);
     if (file.type !== "application/pdf" && !file.name.toLowerCase().endsWith(".pdf")) {
-      setError("Please upload a PDF file.");
+      setError("That file isn’t a PDF. Export your resume as a PDF and try again.");
       return;
     }
     if (file.size > LIMITS.resumeBytes) {
-      setError("That PDF is larger than 4 MB. Please upload a smaller file.");
+      setError("That PDF is over 4 MB. Try a compressed or text-only export.");
       return;
     }
 
@@ -50,7 +50,7 @@ export default function UploadPage() {
       }
       router.push("/setup");
     } catch (err) {
-      setError(err instanceof ClientApiError ? err.message : "Error processing resume. Please try again.");
+      setError(err instanceof ClientApiError ? err.message : "We couldn’t read that resume. Try again, or continue without it.");
       setIsUploading(false);
     }
   };
@@ -74,9 +74,9 @@ export default function UploadPage() {
     <main className="flex min-h-[100dvh] items-center justify-center bg-cream p-4 pt-28 text-vast md:p-6 md:pt-28">
       <div className="card w-full max-w-xl p-6 text-center md:p-12">
         <p className="mb-2 text-sm font-bold uppercase tracking-widest text-forest">Step 1 of 3</p>
-        <h1 className="mb-3 font-serif text-4xl">Upload your resume</h1>
+        <h1 className="mb-3 font-serif text-4xl">Start with your resume</h1>
         <p className="mb-8 text-vast/75">
-          The interviewer uses it to ask about your real experience. Optional, but it makes practice far more relevant.
+          Aria reads it so questions dig into your actual projects, not generic trivia. Optional, but it sharpens every follow-up.
         </p>
 
         {existing && !isUploading && (
@@ -129,7 +129,7 @@ export default function UploadPage() {
             {isUploading ? (
               <>
                 <FileText className="mb-4 h-12 w-12 animate-pulse text-forest" />
-                <span className="text-lg font-semibold text-forest">Reading your resume…</span>
+                <span className="text-lg font-semibold text-forest">Reading your experience…</span>
               </>
             ) : (
               <>
@@ -158,10 +158,10 @@ export default function UploadPage() {
         )}
 
         <button onClick={skip} disabled={isUploading} className="mt-6 text-sm font-semibold underline underline-offset-4 disabled:opacity-50">
-          {existing ? "Continue without a resume (removes it)" : "Continue without a resume"}
+          {existing ? "Skip the resume (removes the current one)" : "Skip for now, practice without a resume"}
         </button>
         <p className="mt-6 text-sm text-vast/70">
-          Your resume is used only for your practice sessions. See our <Link href="/#privacy" className="underline">privacy notes</Link>.
+          Your resume only shapes your practice questions. See our <Link href="/#privacy" className="underline">privacy notes</Link>.
         </p>
       </div>
     </main>
