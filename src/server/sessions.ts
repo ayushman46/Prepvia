@@ -56,14 +56,25 @@ export type SessionDoc = Partial<InterviewPlan> & {
 
 export type EvaluationDoc = {
   session_id: string;
-  status?: "generating" | "ready";
+  status?: "generating" | "ready" | "failed";
   score?: number;
   strengths?: string[];
   improvements?: string[];
   competency_scores?: unknown[];
   evidence?: unknown[];
   summary?: string;
+  /** Start of the current generation claim (also its ownership token). */
   started_at?: Date;
+  /** Generation attempts since the last success or manual retry. */
+  attempts?: number;
+  /** A failed attempt: why, whether retrying can help, and when an automatic retry may start. */
+  error_code?: string;
+  retryable?: boolean;
+  failed_at?: Date;
+  retry_at?: Date;
+  /** What a ready report was built from, to detect answers saved after it. */
+  transcript_count?: number;
+  answer_count?: number;
   created_at?: Date;
   expires_at?: Date;
 };
@@ -332,48 +343,100 @@ export async function markCompleted(id: string): Promise<void> {
 
 export function isReadyEvaluation(doc: EvaluationDoc | null): boolean {
   // Legacy evaluations (Python backend) have no status but do have a score.
-  return !!doc && doc.status !== "generating" && typeof doc.score === "number";
+  return !!doc && (doc.status === "ready" || doc.status === undefined) && typeof doc.score === "number";
 }
 
 export async function getEvaluation(id: string): Promise<EvaluationDoc | null> {
   return (await evaluations()).findOne({ session_id: id });
 }
 
+/** Candidate answers saved so far (a late answer makes an earlier report stale). */
+export async function countAnswers(id: string): Promise<number> {
+  return (await transcripts()).countDocuments({ session_id: id, role: "user" });
+}
+
+/** When the last transcript entry was saved: the effective end of the conversation. */
+export async function lastTranscriptAt(id: string): Promise<Date | null> {
+  const doc = await (await transcripts()).findOne({ session_id: id }, { sort: { timestamp: -1 }, projection: { timestamp: 1 } });
+  return doc?.timestamp instanceof Date ? doc.timestamp : null;
+}
+
 /**
- * Claim the right to generate a report. Returns true when this caller should
- * generate it; false when another request is already generating (or done).
+ * How to claim report generation, from the evaluation state the caller observed:
+ * a first claim, taking over an abandoned claim, retrying a failed attempt, or
+ * regenerating a ready report that answers saved later have made stale.
  */
-export async function claimEvaluation(id: string, staleAfterMs = 150_000): Promise<boolean> {
+export type EvaluationClaim =
+  | { mode: "new" }
+  | { mode: "takeover"; startedAt: Date | null }
+  | { mode: "retry"; failedAt: Date | null; resetAttempts: boolean }
+  | { mode: "regenerate"; createdAt: Date | null };
+
+/**
+ * Claim the right to generate a report. Returns the claim's start time (the
+ * ownership token for failEvaluation) when this caller should generate it, or
+ * null when another request got there first. Every transition is a
+ * compare-and-swap on the observed state, so concurrent claimers can't both win.
+ */
+export async function claimEvaluation(id: string, claim: EvaluationClaim): Promise<Date | null> {
   const collection = await evaluations();
   const now = new Date();
-  try {
-    const before = await collection.findOneAndUpdate(
-      { session_id: id },
-      { $setOnInsert: { session_id: id, status: "generating", started_at: now, expires_at: expiry() } },
-      { upsert: true, returnDocument: "before" },
-    );
-    if (!before) return true;
-  } catch (error) {
-    // Duplicate key from a concurrent upsert: someone else owns the claim.
-    if ((error as { code?: number }).code === 11000) return false;
-    throw error;
+  if (claim.mode === "new") {
+    try {
+      const before = await collection.findOneAndUpdate(
+        { session_id: id },
+        { $setOnInsert: { session_id: id, status: "generating", started_at: now, attempts: 1, expires_at: expiry() } },
+        { upsert: true, returnDocument: "before" },
+      );
+      return before ? null : now;
+    } catch (error) {
+      // Duplicate key from a concurrent upsert: someone else owns the claim.
+      if ((error as { code?: number }).code === 11000) return null;
+      throw error;
+    }
   }
-  // Take over a claim abandoned by a crashed or timed-out invocation.
-  const takeover = await collection.updateOne(
-    { session_id: id, status: "generating", started_at: { $lt: new Date(now.getTime() - staleAfterMs) } },
-    { $set: { started_at: now } },
-  );
-  return takeover.modifiedCount === 1;
+  // `null` in a filter also matches a missing field (e.g. a claim without started_at).
+  const filter: Document =
+    claim.mode === "takeover"
+      ? { session_id: id, status: "generating", started_at: claim.startedAt }
+      : claim.mode === "retry"
+        ? { session_id: id, status: "failed", failed_at: claim.failedAt }
+        : { session_id: id, status: "ready", created_at: claim.createdAt };
+  const resetAttempts = claim.mode === "regenerate" || (claim.mode === "retry" && claim.resetAttempts);
+  const result = await collection.updateOne(filter as Filter<EvaluationDoc>, {
+    $set: { status: "generating", started_at: now, expires_at: expiry(), ...(resetAttempts ? { attempts: 1 } : {}) },
+    ...(resetAttempts ? {} : { $inc: { attempts: 1 } }),
+  });
+  return result.modifiedCount === 1 ? now : null;
 }
 
 export async function saveEvaluation(id: string, data: Omit<EvaluationDoc, "session_id">): Promise<void> {
   await (await evaluations()).updateOne(
     { session_id: id },
-    { $set: { ...data, status: "ready", created_at: new Date(), expires_at: expiry() }, $unset: { started_at: "" } },
+    {
+      $set: { ...data, status: "ready", created_at: new Date(), expires_at: expiry() },
+      $unset: { started_at: "", attempts: "", error_code: "", retryable: "", failed_at: "", retry_at: "" },
+    },
     { upsert: true },
   );
 }
 
-export async function releaseEvaluationClaim(id: string): Promise<void> {
-  await (await evaluations()).deleteOne({ session_id: id, status: "generating" });
+/** Record a failed attempt, only if `startedAt` still owns the claim. */
+export async function failEvaluation(
+  id: string,
+  startedAt: Date,
+  failure: { code: string; retryable: boolean; retryAt: Date },
+): Promise<void> {
+  await (await evaluations()).updateOne(
+    { session_id: id, status: "generating", started_at: startedAt },
+    {
+      $set: {
+        status: "failed",
+        error_code: failure.code,
+        retryable: failure.retryable,
+        failed_at: new Date(),
+        retry_at: failure.retryAt,
+      },
+    },
+  );
 }

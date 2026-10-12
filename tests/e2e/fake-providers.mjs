@@ -7,7 +7,7 @@
 import http from "node:http";
 
 const port = Number(process.argv[2] || 4010);
-const stats = { chat: 0, analysis: 0, report: 0, stt: 0, canvasTask: 0, failNextChat: 0, lastSystem: "", nextTranscripts: [] };
+const stats = { chat: 0, analysis: 0, report: 0, verify: 0, stt: 0, canvasTask: 0, failNextChat: 0, lastSystem: "", nextTranscripts: [] };
 
 function sse(res, text, delayMs = 15) {
   res.writeHead(200, { "Content-Type": "text/event-stream", "Cache-Control": "no-cache" });
@@ -113,7 +113,7 @@ const server = http.createServer((req, res) => {
       const body = JSON.parse(raw.toString("utf8"));
       const all = body.messages.map((m) => m.content).join("\n");
       const last = body.messages.at(-1).content;
-      const isBackground = /Write the scorecard|Analyze the latest candidate answer|Design ONE hands-on exercise/.test(all);
+      const isBackground = /Write the scorecard|double-checking a draft interview scorecard|Analyze the latest candidate answer|Design ONE hands-on exercise/.test(all);
       if (stats.failNextChat > 0 && !isBackground) {
         stats.failNextChat -= 1;
         res.writeHead(503, { "Content-Type": "application/json" });
@@ -122,6 +122,10 @@ const server = http.createServer((req, res) => {
       if (/Write the scorecard/.test(last)) {
         stats.report += 1;
         return sse(res, `<think>scoring</think>\`\`\`json\n${JSON.stringify(REPORT)}\n\`\`\``, 2);
+      }
+      if (/double-checking a draft interview scorecard/.test(body.messages[0].content)) {
+        stats.verify += 1;
+        return sse(res, JSON.stringify({ remove: [] }), 2);
       }
       if (/Analyze the latest candidate answer/.test(last)) {
         stats.analysis += 1;

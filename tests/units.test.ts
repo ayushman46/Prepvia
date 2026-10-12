@@ -193,7 +193,7 @@ describe("normalizeReport", () => {
       score: 140,
       summary: " Solid. ",
       strengths: ["Clear", "", 3],
-      improvements: "not a list",
+      improvements: "A lone string becomes one item",
       competency_scores: [
         { name: "Communication", score: 4.2, rationale: "Structured answers", confidence: 2, evidence: ["e"] },
         { name: "Depth", score: "3" },
@@ -206,19 +206,23 @@ describe("normalizeReport", () => {
     expect(report.score).toBe(100);
     expect(report.summary).toBe("Solid.");
     expect(report.strengths).toEqual(["Clear", "3"]);
-    expect(report.improvements).toEqual([]);
+    expect(report.improvements).toEqual(["A lone string becomes one item"]);
     expect(report.competency_scores.map((c) => [c.name, c.score, c.confidence, c.rationale])).toEqual([
       ["Communication", 4.2, 1, "Structured answers"],
       ["Depth", 3, null, ""],
     ]);
-    expect(report.question_feedback).toEqual([{ question: "Q1", answer_summary: "A1", rating: 4, feedback: "good", tip: "add metrics" }]);
+    expect(report.question_feedback).toEqual([
+      { question: "Q1", question_turn: null, answer_turns: [], answer_summary: "A1", rating: 4, technical_issues: [], feedback: "good", tip: "add metrics" },
+    ]);
     expect(report.hands_on).toEqual({ summary: "Working solution", rating: 3.5, strengths: ["tests"], gaps: ["edge cases"] });
     expect(report.evidence).toEqual([{ type: "strength", statement: "Explained trade-offs" }]);
   });
 
   it("converts legacy 0-100 and 0-10 competency scales to the 1-5 rubric", () => {
     expect(normalizeReport({ competency_scores: [{ name: "A", score: 80 }, { name: "B", score: 45 }] }).competency_scores.map((c) => c.score)).toEqual([4, 2.3]);
-    expect(normalizeReport({ competency_scores: [{ name: "A", score: 8 }, { name: "B", score: 3 }] }).competency_scores.map((c) => c.score)).toEqual([4, 1.5]);
+    // A strict majority on 0-10 puts the small value on that scale too; a tie reads each on its own.
+    expect(normalizeReport({ competency_scores: [{ name: "A", score: 8 }, { name: "B", score: 7 }, { name: "C", score: 3 }] }).competency_scores.map((c) => c.score)).toEqual([4, 3.5, 1.5]);
+    expect(normalizeReport({ competency_scores: [{ name: "A", score: 8 }, { name: "B", score: 3 }] }).competency_scores.map((c) => c.score)).toEqual([4, 3]);
     expect(toFivePoint(0)).toBe(1);
     expect(toFivePoint("4.44")).toBe(4.4);
     expect(toFivePoint("n/a")).toBeNull();

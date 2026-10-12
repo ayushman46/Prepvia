@@ -338,12 +338,26 @@ await step("timed sections: the interview closes itself after the scheduled time
   assert.ok(!spoken(events).includes("<<"), "end marker never spoken");
 });
 
-await step("report is generated once, cached, and normalized as a scorecard", async () => {
+/** Poll the report the way the report page does, until it is ready. */
+async function pollReport(id, attempts = 80) {
+  for (let i = 0; i < attempts; i++) {
+    const res = await json(`/api/report/${id}`);
+    if (res.status === 200) return res.body;
+    assert.equal(res.status, 202, JSON.stringify(res.body));
+    assert.equal(res.body.status, "generating");
+    await sleep(250);
+  }
+  throw new Error("report was not ready in time");
+}
+
+await step("ending the interview starts the report; it is generated once, cached, and normalized as a scorecard", async () => {
+  const ended = await post(`/api/interview/${sessionId}/end`, {});
+  assert.equal(ended.status, 200);
+  assert.equal(ended.body.report, "generating", "the end route kicks off generation");
+  // Polls return at once while the report is being written, and never start a second run.
   const [first, second] = await Promise.all([json(`/api/report/${sessionId}`), json(`/api/report/${sessionId}`)]);
-  const ready = [first, second].find((r) => r.status === 200);
-  assert.ok(ready, `statuses ${first.status}/${second.status}`);
-  assert.ok([first.status, second.status].every((s) => s === 200 || s === 202));
-  const report = ready.body;
+  assert.ok([first.status, second.status].every((s) => s === 200 || s === 202), `statuses ${first.status}/${second.status}`);
+  const report = await pollReport(sessionId);
   assert.equal(report.status, "ready");
   assert.equal(report.score, 72);
   assert.deepEqual(report.competency_scores.map((c) => c.score), [3.9, 3.3]);
@@ -351,6 +365,11 @@ await step("report is generated once, cached, and normalized as a scorecard", as
   assert.equal(report.question_feedback.length, 1);
   assert.equal(report.hands_on, null, "no hands-on section when no exercise happened (deterministic guard)");
   assert.deepEqual(report.integrity.notes, ["Left the interview tab 1 time.", "Pasted large blocks of text 1 time."]);
+  const view = await json(`/api/interview/${sessionId}`);
+  assert.equal(report.meta.answered_questions, view.body.transcript.filter((m) => m.role === "user").length);
+  assert.equal(report.meta.limited_evidence, false);
+  assert.deepEqual(report.question_feedback[0].technical_issues, []);
+  assert.ok((await fakeStats()).verify >= 1, "the verification pass ran");
   const before = (await fakeStats()).report;
   const again = await json(`/api/report/${sessionId}`);
   assert.equal(again.status, 200);
@@ -360,14 +379,10 @@ await step("report is generated once, cached, and normalized as a scorecard", as
 });
 
 await step("a report for an interview with a canvas exercise keeps its hands-on evaluation", async () => {
-  let report;
-  for (let i = 0; i < 20 && !report; i++) {
-    const res = await json(`/api/report/${timedId}`);
-    if (res.status === 200) report = res.body;
-    else await sleep(300);
-  }
-  assert.ok(report, "timed session report");
+  const report = await pollReport(timedId);
   assert.equal(report.hands_on?.rating, 3.5);
+  assert.equal(report.meta.hands_on_happened, true);
+  assert.equal(report.meta.hands_on_work_submitted, true, "the candidate changed the starter code");
 });
 
 await step("completed interviews reject new turns and canvas edits", async () => {

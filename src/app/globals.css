@@ -111,3 +111,46 @@
     transform: scale(1.03);
   }
 }
+
+/* ------------------------------------------------------------------- print */
+/* "Save as PDF" on the report page: keep the colours, show everything, avoid split cards. */
+@media print {
+  @page {
+    margin: 14mm 12mm;
+  }
+  html,
+  body {
+    background: #ffffff !important;
+  }
+  *,
+  *::before,
+  *::after {
+    -webkit-print-color-adjust: exact;
+    print-color-adjust: exact;
+  }
+  /* Collapsed content and scrolling code blocks print in full. */
+  details > :not(summary) {
+    display: block !important;
+  }
+  pre {
+    max-height: none !important;
+    overflow: visible !important;
+    white-space: pre-wrap !important;
+    overflow-wrap: anywhere;
+  }
+  h1,
+  h2,
+  h3,
+  h4 {
+    break-after: avoid-page;
+  }
+  article,
+  li,
+  blockquote {
+    break-inside: avoid-page;
+  }
+  a {
+    color: inherit;
+    text-decoration: none;
+  }
+}

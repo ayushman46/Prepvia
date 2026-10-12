@@ -213,16 +213,35 @@ export type CanvasTask = {
   focus: string[];
 };
 
+/** Code compared without any whitespace, so re-indenting the starter code is not "work". */
+function compactCode(code: unknown): string {
+  return String(code ?? "").replace(/\s+/g, "");
+}
+
+/**
+ * Whether the canvas holds work by the candidate. The editor starts with the
+ * exercise's starter code, so content equal to it (ignoring whitespace) or an
+ * empty editor means nothing was submitted.
+ */
+export function canvasWorkSubmitted(content: unknown, starterCode: unknown): boolean {
+  const work = compactCode(content);
+  return work !== "" && work !== compactCode(starterCode);
+}
+
 function canvasFromSession(session: SessionLike, live: boolean, include?: boolean) {
   const canvas = isRecord(session.canvas) ? session.canvas : null;
   const task = canvas && isRecord(canvas.task) ? (canvas.task as unknown as CanvasTask) : null;
   // The exercise is generated in the background early on; the interviewer must not
   // see (or bring up) it until the canvas is actually open on the candidate's screen.
   if (!task || !(include ?? !!canvas?.introduced_at)) return null;
+  const submitted = canvasWorkSubmitted(canvas?.content, task.starter_code);
   return {
     task: { title: task.title, instructions: clip(task.instructions, 3_000), language: task.language },
-    // The candidate's live work in the canvas editor (may be empty).
-    candidate_work: clip(canvas?.content, live ? 6_000 : 20_000),
+    // Provided by the interviewer with the exercise: never the candidate's own work.
+    starter_code: clip(task.starter_code, live ? 2_000 : 4_000),
+    work_status: submitted ? "submitted" : "no_work_submitted",
+    // The candidate's live work in the canvas editor; empty while it is still just the starter code.
+    candidate_work: submitted ? clip(canvas?.content, live ? 6_000 : 20_000) : "",
     language: String(canvas?.language ?? task.language ?? "text"),
   };
 }
