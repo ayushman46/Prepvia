@@ -164,7 +164,7 @@ export default function LandingPage() {
       </section>
 
       <footer className="w-full border-t-2 border-vast/10 px-6 py-8 text-center text-sm text-vast/60">
-        InterviewAI is for practice, not a hiring signal. It makes no hiring decisions, and AI feedback can miss things.
+        InterviewAI is for practice. It doesn&apos;t predict hiring outcomes, and AI feedback can miss things.
       </footer>
     </main>
   );
