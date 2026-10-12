@@ -15,7 +15,7 @@ export function GeneratingScreen({ elapsedMs, retrying }: { elapsedMs: number; r
   const step = generationStep(elapsedMs);
   return (
     <Screen>
-      <h1 className="font-serif text-3xl md:text-4xl">Generating your report</h1>
+      <h1 className="font-serif text-3xl md:text-4xl">Writing your scorecard</h1>
       <div role="status" aria-live="polite" aria-atomic="true">
         <p className="mt-3 text-vast/75">{generationDetail(elapsedMs, retrying)}</p>
       </div>

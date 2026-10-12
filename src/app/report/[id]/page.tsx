@@ -32,17 +32,17 @@ const sleep = (ms: number, signal: AbortSignal) =>
 
 function errorState(error: ClientApiError | null): PageState {
   if (error?.code === "session_not_found") {
-    return { kind: "error", title: "Interview not found", message: error.message, retryable: false };
+    return { kind: "error", title: "We couldn't find this interview", message: error.message, retryable: false };
   }
   if (error?.code === "report_failed") {
     return {
       kind: "error",
-      title: "We couldn't finish your report",
-      message: "The AI service didn't return a complete report after a few tries. Your interview is saved, so you can try again in a moment.",
+      title: "Your report needs another try",
+      message: "Our AI reviewer couldn't finish the report after a few attempts. Your answers are safely saved, so try again in a moment.",
       retryable: true,
     };
   }
-  return { kind: "error", title: "Report unavailable", message: error?.message ?? "Couldn't load the report.", retryable: true };
+  return { kind: "error", title: "We couldn't load your report", message: error?.message ?? "Something went wrong loading the report. Your answers are saved, so please try again.", retryable: true };
 }
 
 /** Poll until the report is ready, or a final error; transient failures are retried with backoff. */
@@ -63,8 +63,8 @@ async function pollReport(
       if (elapsedMs > GIVE_UP_MS) {
         return {
           kind: "error",
-          title: "This is taking longer than expected",
-          message: "Your report is still not ready. Try again, and if it keeps happening, come back to this page a little later.",
+          title: "Your report is taking longer than usual",
+          message: "It isn't ready yet, but your answers are saved. Try again now, or come back to this page in a few minutes.",
           retryable: true,
         };
       }
@@ -128,7 +128,7 @@ export default function ReportPage() {
   if (state.kind === "empty") {
     // An active interview can still be answered; an ended one never will be.
     return session?.status === "active" ? (
-      <MessageScreen title="No answers yet" message="Answer at least one interview question, then end the interview to get your scorecard.">
+      <MessageScreen title="Nothing to score yet" message="Your scorecard is built from your answers. Head back, answer at least one question, then end the interview to see your feedback.">
         <Link href={`/interview/${sessionId}`} className="btn-primary">
           Back to interview
         </Link>
@@ -138,8 +138,8 @@ export default function ReportPage() {
       </MessageScreen>
     ) : (
       <MessageScreen
-        title="No report for this interview"
-        message="This interview ended before any answers were recorded, so there's nothing to score. Start a new interview and answer at least one question to get a scorecard."
+        title="This interview has no answers to review"
+        message="It ended before any answers were recorded, so there's nothing to score. Start a fresh interview and answer even one question to get evidence-backed feedback."
       >
         <Link href="/upload" className="btn-primary">
           Start a new interview

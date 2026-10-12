@@ -64,7 +64,7 @@ export function formatDate(iso: string | null | undefined): string | null {
 
 // ------------------------------------------------------------- progress
 
-export const GENERATION_STEPS = ["Reading your answers…", "Scoring competencies…", "Writing feedback…"] as const;
+export const GENERATION_STEPS = ["Reading your answers…", "Scoring each competency…", "Writing your coaching notes…"] as const;
 
 /** Which step to show after `elapsedMs` of generation (a reasoning model takes ~30-120 s). */
 export function generationStep(elapsedMs: number): number {
@@ -74,14 +74,14 @@ export function generationStep(elapsedMs: number): number {
 }
 
 const STEP_DETAILS = [
-  "Going through every answer you gave. This usually takes one to two minutes.",
-  "Rating each competency against the rubric, with evidence.",
-  "Writing feedback and tips for each question.",
+  "Reviewing every answer you gave. This usually takes a minute or two.",
+  "Scoring each competency against the rubric and citing your own words as evidence.",
+  "Writing specific feedback and next steps for each question.",
 ];
 
 export function generationDetail(elapsedMs: number, retrying: boolean): string {
-  if (retrying) return "The AI service was busy, so we're trying again automatically.";
-  if (elapsedMs > 75_000) return "Almost there. Detailed reports can take up to two minutes.";
+  if (retrying) return "Our AI reviewer was busy, so we're retrying automatically. No need to do anything.";
+  if (elapsedMs > 75_000) return "Almost there. Thorough reports can take up to two minutes.";
   return STEP_DETAILS[generationStep(elapsedMs)];
 }
 
