@@ -311,3 +311,51 @@ describe("complete(): background retries on rate limits", () => {
     await expect(complete([{ role: "user", content: "x" }], "analysis")).rejects.toMatchObject({ retryable: true, retryAfterMs: 2_000 });
   });
 });
+
+describe("completeWithDetails: finish_reason and error selection", () => {
+  const originalEnv = { ...process.env };
+  beforeEach(() => {
+    process.env.NVIDIA_API_KEY = "nv-test";
+    process.env.GROQ_API_KEY = "gq-test";
+    process.env.LLM_FALLBACK_GROQ = "true";
+  });
+  afterEach(() => {
+    process.env = { ...originalEnv };
+    vi.unstubAllGlobals();
+  });
+
+  function sseWithFinish(contents: string[], finishReason: string): Response {
+    const chunks = contents.map((c) => `data: ${JSON.stringify({ choices: [{ delta: { content: c }, finish_reason: null }] })}\n\n`);
+    chunks.push(`data: ${JSON.stringify({ choices: [{ delta: {}, finish_reason: finishReason }] })}\n\n`, "data: [DONE]\n\n");
+    return new Response(chunks.join(""), { status: 200, headers: { "Content-Type": "text/event-stream" } });
+  }
+
+  it("exposes the provider's finish_reason, so truncated output can be rejected", async () => {
+    const { completeWithDetails } = await import("@/server/llm");
+    vi.stubGlobal("fetch", vi.fn().mockResolvedValueOnce(sseWithFinish(['{"score": 7', "0, "], "length")));
+    expect(await completeWithDetails([{ role: "user", content: "x" }], "analysis")).toEqual({ text: '{"score": 70, ', finishReason: "length" });
+    vi.stubGlobal("fetch", vi.fn().mockResolvedValueOnce(sseResponse(["done"])));
+    expect(await completeWithDetails([{ role: "user", content: "x" }], "analysis")).toEqual({ text: "done", finishReason: null });
+  });
+
+  it("keeps a retryable 429 over a later non-retryable fallback error", async () => {
+    vi.stubGlobal(
+      "fetch",
+      vi
+        .fn()
+        .mockResolvedValueOnce(new Response("slow down", { status: 429, headers: { "retry-after": "4" } })) // NVIDIA
+        .mockResolvedValueOnce(new Response('{"error":{"message":"Invalid API Key"}}', { status: 401 })), // Groq
+    );
+    await expect(collect(streamCompletion([{ role: "user", content: "x" }], "analysis"))).rejects.toMatchObject({
+      retryable: true,
+      retryAfterMs: 4_000,
+    });
+  });
+
+  it("still reports a non-retryable failure when nothing was retryable", async () => {
+    const { pickProviderError } = await import("@/server/llm");
+    const fatal = new LlmError("bad key", false);
+    expect(pickProviderError([fatal])).toBe(fatal);
+    expect(pickProviderError([new Error("x"), fatal])).toBe(fatal);
+  });
+});

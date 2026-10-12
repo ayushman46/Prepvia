@@ -12,8 +12,9 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { MongoClient } from "mongodb";
 
-const APP_PORT = 3100;
-const FAKE_PORT = 4010;
+// Overridable so concurrent runs (e.g. from several worktrees) don't collide.
+const APP_PORT = Number(process.env.E2E_APP_PORT || 3100);
+const FAKE_PORT = Number(process.env.E2E_FAKE_PORT || 4010);
 const DB_NAME = `interviewai_e2e_${Date.now().toString(36)}`;
 
 function loadEnvLocal() {

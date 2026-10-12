@@ -10,7 +10,7 @@
  * long/quiet answers, barge-in, mute, refresh, end + mic release) · C push-to-talk.
  * Results depend on the room: background voices are real input to the microphone.
  */
-import { spawn, spawnSync } from "node:child_process";
+import { spawn } from "node:child_process";
 import { existsSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
 import net from "node:net";
 import { dirname, join } from "node:path";

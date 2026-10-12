@@ -87,10 +87,20 @@ export type CompetencyScore = {
   negative_signals: string[];
 };
 
+/**
+ * Report text may cite transcript entries as [#n] (1-based, in transcript
+ * order); the report page links them to the transcript.
+ */
 export type QuestionFeedback = {
   question: string;
+  /** The interviewer entry that asked it, and the candidate entries that answered (absent on older reports). */
+  question_turn: number | null;
+  answer_turns: number[];
+  /** A paraphrase, not the candidate's words. */
   answer_summary: string;
   rating: number | null;
+  /** Factual errors, overclaims or inconsistent numbers in the answer. */
+  technical_issues: string[];
   feedback: string;
   tip: string;
 };
@@ -109,8 +119,32 @@ export type IntegritySummary = {
   notes: string[];
 };
 
+/** Facts about the interview the report was built from (absent on older reports). */
+export type ReportMeta = {
+  /** Candidate answers in the transcript, and how many of them were substantive (not one-liners). */
+  answered_questions: number;
+  substantive_answers: number;
+  /** Actual length, from the interviewer's first words to the end; null if unknown. */
+  duration_minutes: number | null;
+  planned_minutes: number;
+  interview_type: InterviewType;
+  level: InterviewLevel;
+  hands_on_happened: boolean;
+  /** False when the canvas still held only the starter code; null without an exercise. */
+  hands_on_work_submitted: boolean | null;
+  /** Too few substantive answers for confident scores (scores and confidence are capped). */
+  limited_evidence: boolean;
+  generated_at: string;
+};
+
 export type ReportView =
-  | { status: "generating" }
+  | {
+      status: "generating";
+      /** Time since the current generation attempt started. */
+      elapsed_ms?: number;
+      /** A previous attempt failed transiently; the server retries automatically. */
+      retrying?: boolean;
+    }
   | {
       status: "ready";
       score: number;
@@ -122,6 +156,7 @@ export type ReportView =
       hands_on: HandsOnFeedback | null;
       integrity: IntegritySummary;
       evidence: { type: string; statement: string }[];
+      meta?: ReportMeta;
     };
 
 export type ApiErrorBody = { error: { code: string; message: string } };

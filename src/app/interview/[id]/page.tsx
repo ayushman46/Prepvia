@@ -453,8 +453,15 @@ function InterviewRoom() {
   }
   if (session.status === "completed" && !started) {
     return (
-      <FullScreenMessage title="This interview has ended" body="Your feedback report is ready to view.">
-        <Link href={`/report/${sessionId}`} className="btn-primary">View report</Link>
+      <FullScreenMessage
+        title="This interview has ended"
+        body={session.transcript.some((m) => m.role === "user") ? "Your feedback report is ready to view." : "No questions were answered, so there is no report to show."}
+      >
+        {session.transcript.some((m) => m.role === "user") ? (
+          <Link href={`/report/${sessionId}`} className="btn-primary">View report</Link>
+        ) : (
+          <Link href="/upload" className="btn-primary">Start a new interview</Link>
+        )}
       </FullScreenMessage>
     );
   }

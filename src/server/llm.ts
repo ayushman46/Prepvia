@@ -92,6 +92,8 @@ export type CompletionOptions = {
   temperature?: number;
   /** Reports which provider/model actually served the response (monitoring). */
   onServed?: (provider: string, model: string) => void;
+  /** Receives the provider's finish_reason ("stop", or "length" when max_tokens cut the output short). */
+  onFinishReason?: (reason: string) => void;
 };
 
 async function* streamFromProvider(
@@ -162,7 +164,10 @@ async function* streamFromProvider(
         if (!line.startsWith("data:")) continue;
         const data = line.slice(5).trim();
         if (data === "[DONE]") return;
-        let parsed: { choices?: { delta?: { content?: string | null } }[]; error?: { message?: string } };
+        let parsed: {
+          choices?: { delta?: { content?: string | null }; finish_reason?: string | null }[];
+          error?: { message?: string };
+        };
         try {
           parsed = JSON.parse(data);
         } catch {
@@ -171,6 +176,8 @@ async function* streamFromProvider(
         if (parsed.error) throw new LlmError(`${provider.name} stream error: ${parsed.error.message ?? "unknown"}`);
         const content = parsed.choices?.[0]?.delta?.content;
         if (content) yield content;
+        const finishReason = parsed.choices?.[0]?.finish_reason;
+        if (finishReason) options.onFinishReason?.(finishReason);
       }
     }
   } catch (error) {
@@ -251,6 +258,15 @@ export async function* hedgedStream(
 }
 
 /**
+ * The error to surface when every provider failed. A retryable failure (e.g. a
+ * 429 on the primary) wins over a later non-retryable one (e.g. a misconfigured
+ * fallback), so callers back off and retry instead of reporting "not configured".
+ */
+export function pickProviderError(errors: unknown[]): unknown {
+  return errors.find((error) => error instanceof LlmError && error.retryable) ?? errors[errors.length - 1];
+}
+
+/**
  * Stream tokens, failing over to the next configured provider only if the
  * current one fails before producing any output (so text is never duplicated).
  * Realtime requests are hedged against slow first tokens.
@@ -266,6 +282,7 @@ export async function* streamCompletion(
   }
 
   const startedAt = Date.now();
+  const errors: unknown[] = [];
   let lastError: unknown;
   // Live turns get a second round when every provider failed quickly and retryably
   // (for example a burst 429 on the primary while the backup stalls), so the
@@ -297,21 +314,58 @@ export async function* streamCompletion(
           : streamFromProvider(provider, messages, purpose, options);
       if (purpose !== "realtime") options.onServed?.(provider.name, provider.model);
       let yielded = false;
+      let failure: unknown;
       try {
         for await (const chunk of stream) {
           yielded = true;
           yield chunk;
         }
         if (yielded) return;
-        lastError = new LlmError(`${provider.name} returned an empty response`);
+        failure = new LlmError(`${provider.name} returned an empty response`);
       } catch (error) {
         if (yielded) throw error;
-        lastError = error;
+        failure = error;
       }
-      logger.warn("LLM provider failed; trying next provider", lastError, { provider: provider.name, purpose });
+      errors.push(failure);
+      lastError = failure;
+      logger.warn("LLM provider failed; trying next provider", failure, { provider: provider.name, purpose });
     }
   }
-  throw lastError instanceof LlmError ? lastError : new LlmError("All language model providers failed.");
+  const error = pickProviderError(errors);
+  throw error instanceof LlmError ? error : new LlmError("All language model providers failed.");
+}
+
+export type CompletionResult = {
+  text: string;
+  /** "stop" for a complete answer, "length" when max_tokens truncated it; null if the provider didn't say. */
+  finishReason: string | null;
+};
+
+/** Collect a full completion and how it ended, retrying background work with backoff. */
+export async function completeWithDetails(
+  messages: ChatMessage[],
+  purpose: Purpose = "analysis",
+  options: CompletionOptions = {},
+): Promise<CompletionResult> {
+  const deadline = Date.now() + (options.retryForMs ?? 0);
+  for (let attempt = 0; ; attempt++) {
+    let finishReason: string | null = null;
+    try {
+      let text = "";
+      const onFinishReason = (reason: string) => {
+        finishReason = reason;
+        options.onFinishReason?.(reason);
+      };
+      for await (const chunk of streamCompletion(messages, purpose, { ...options, onFinishReason })) text += chunk;
+      return { text, finishReason };
+    } catch (error) {
+      const retryable = error instanceof LlmError && error.retryable;
+      const wait = Math.min(15_000, (error instanceof LlmError && error.retryAfterMs) || 1_000 * 2 ** attempt);
+      if (!retryable || options.signal?.aborted || Date.now() + wait > deadline) throw error;
+      logger.warn("LLM call rate limited or failed; backing off", error, { purpose, waitMs: wait, attempt });
+      await new Promise((resolve) => setTimeout(resolve, wait));
+    }
+  }
 }
 
 export async function complete(
@@ -319,20 +373,7 @@ export async function complete(
   purpose: Purpose = "analysis",
   options: CompletionOptions = {},
 ): Promise<string> {
-  const deadline = Date.now() + (options.retryForMs ?? 0);
-  for (let attempt = 0; ; attempt++) {
-    try {
-      let text = "";
-      for await (const chunk of streamCompletion(messages, purpose, options)) text += chunk;
-      return text;
-    } catch (error) {
-      const retryable = error instanceof LlmError && error.retryable;
-      const wait = Math.min(15_000, (error instanceof LlmError && error.retryAfterMs) || 1_000 * 2 ** attempt);
-      if (!retryable || Date.now() + wait > deadline) throw error;
-      logger.warn("LLM call rate limited or failed; backing off", error, { purpose, waitMs: wait, attempt });
-      await new Promise((resolve) => setTimeout(resolve, wait));
-    }
-  }
+  return (await completeWithDetails(messages, purpose, options)).text;
 }
 
 const ABBREVIATIONS = new Set([
