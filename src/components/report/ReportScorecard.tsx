@@ -507,7 +507,7 @@ function QuestionCard({ item, index }: { item: QuestionFeedback; index: number }
       )}
       {item.technical_issues.length > 0 && (
         <div className="mb-3 rounded-xl border-2 border-red-700/25 bg-red-50 px-3 py-2 text-sm">
-          <h4 className="mb-1 font-bold text-red-800">Technical issues</h4>
+          <h4 className="mb-1 font-bold text-red-800">Technical points to fix</h4>
           <ul className="list-disc space-y-1 pl-5">
             {item.technical_issues.map((issue, i) => (
               <li key={i} className="break-words">
@@ -656,7 +656,7 @@ export function ReportScorecard({ report, session }: { report: ReadyReport; sess
             />
           )}
           <p className="mt-8 text-center text-sm text-vast/70">
-            AI feedback can be incomplete or wrong. Treat it as a coaching signal and check it against the transcript.
+            This is AI practice feedback, not a hiring prediction. It can miss things, so treat it as a coaching signal and check it against the transcript.
           </p>
         </div>
       </main>
