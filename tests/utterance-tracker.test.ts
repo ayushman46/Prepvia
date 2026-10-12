@@ -154,6 +154,13 @@ describe("UtteranceTracker noise gate", () => {
       expect(old).toBe(false);
       expect(now).toBe(false);
     });
+    it("rejects a short loud thud through the one-word path, but still accepts a crisp close \"No.\"", () => {
+      expect(both((t) => feedAt(t, 0.45, 0.2, 6))).toEqual([false, false]);
+      expect(both((t) => { feedAt(t, 0.5, 0.15, 1); feedAt(t, 0.85, 0.2, 5); feedAt(t, 0.5, 0.1, 1); })).toEqual([true, true]);
+    });
+    it("rejects a cough-and-throat-clear burst (loud, a few frames above 0.6, but no run)", () => {
+      expect(both((t) => { for (let i = 0; i < 4; i++) { feedAt(t, 0.65, 0.3, 2); feedAt(t, 0.2, 0.01, 3); } })).toEqual([false, false]);
+    });
     it("still accepts a close second person (indistinguishable from the candidate by level)", () => {
       expect(both((t) => feedAt(t, 0.9, 0.1, 15))).toEqual([true, true]);
     });
