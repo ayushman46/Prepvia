@@ -161,6 +161,12 @@ describe("UtteranceTracker noise gate", () => {
     it("rejects a cough-and-throat-clear burst (loud, a few frames above 0.6, but no run)", () => {
       expect(both((t) => { for (let i = 0; i < 4; i++) { feedAt(t, 0.65, 0.3, 2); feedAt(t, 0.2, 0.01, 3); } })).toEqual([false, false]);
     });
+    it("trade-off: a loud voice that never reaches p 0.6 is rejected; three frames at 0.6 are enough", () => {
+      const flat = [0.45, 0.55, 0.5, 0.58, 0.48, 0.52];
+      expect(both((t) => { for (let r = 0; r < 4; r++) for (const p of flat) feedAt(t, p, 0.2, 1); })[1]).toBe(false);
+      const lifted = [...flat.slice(0, 3), 0.6, 0.62, 0.6, ...flat];
+      expect(both((t) => { for (const p of lifted) feedAt(t, p, 0.2, 1); })[1]).toBe(true);
+    });
     it("still accepts a close second person (indistinguishable from the candidate by level)", () => {
       expect(both((t) => feedAt(t, 0.9, 0.1, 15))).toEqual([true, true]);
     });
