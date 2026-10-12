@@ -15,6 +15,7 @@ import { cn } from "@/lib/cn";
 import { LIMITS } from "@/lib/protocol";
 import { classifyEndpoint, type EndpointKind } from "@/lib/endpointing";
 import { encodeWav } from "@/lib/wav";
+import { BARGE_IN_DEFAULTS, isBargeInFrame, outputLevelToRms } from "@/lib/barge-in";
 import { MicCheck } from "@/components/MicCheck";
 
 const SECTION_LABELS: Record<string, string> = {
@@ -240,7 +241,9 @@ function InterviewRoom() {
         // only, and never during her goodbye: "thank you" must not cut the closing short).
         if (allowInterrupt && captureMode === "auto" && turnStatus === "speaking" && !limitReached) {
           const recent = bargeWindow.current;
-          recent.push(probability >= BARGE_IN_PROBABILITY);
+          // Confident (p >= 0.7) or moderate-but-loud voice that is clearly above Aria's own echo.
+          const outputRms = outputLevelToRms(interview.getOutputLevel());
+          recent.push(isBargeInFrame({ probability, rms, noiseFloor, outputRms }, { ...BARGE_IN_DEFAULTS, confident: BARGE_IN_PROBABILITY }));
           if (recent.length > BARGE_IN_WINDOW) recent.shift();
           if (recent.filter(Boolean).length >= BARGE_IN_FRAMES) {
             bargeWindow.current = [];
