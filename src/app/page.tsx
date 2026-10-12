@@ -47,7 +47,7 @@ export default function LandingPage() {
     <main className="flex min-h-screen flex-col items-center bg-cream text-vast">
       {/* Hero */}
       <section className="relative flex w-full max-w-5xl flex-col items-center px-6 pb-20 pt-40 text-center md:pt-48">
-        <h1 className="relative z-10 mb-10 font-serif text-[48px] leading-[0.95] tracking-tight md:text-[96px]">
+        <h1 className="relative z-10 mb-10 font-serif text-[clamp(2.25rem,10vw,3rem)] leading-[0.95] tracking-tight md:text-[96px]">
           Practice interviews that <br />
           <span className="relative mt-4 inline-block">
             actually talk back
