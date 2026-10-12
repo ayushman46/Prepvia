@@ -95,6 +95,7 @@ try {
     await page.goto(`${BASE}/upload`);
     await shot(page, t("02-upload"), "resume upload");
     await page.goto(`${BASE}/setup`);
+    await page.locator("#full-name").waitFor();
     await shot(page, t("03-setup"), "interview setup form");
 
     const created = await (

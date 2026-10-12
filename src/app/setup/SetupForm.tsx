@@ -74,18 +74,18 @@ export default function SetupForm() {
   };
 
   return (
-    <main className="flex min-h-[100dvh] items-center justify-center bg-cream p-4 pt-28 text-vast md:p-6 md:pt-28">
-      <div className="card w-full max-w-lg p-6 md:p-12">
-        <p className="mb-2 text-center text-sm font-bold uppercase tracking-widest text-forest">Step 2 of 2</p>
+    <main className="flex min-h-[100dvh] items-center justify-center bg-cream p-4 pt-28 text-vast md:p-6 md:pt-[104px]">
+      <div className="card w-full max-w-3xl p-6 md:px-10 md:py-8">
+        <p className="mb-2 text-center text-sm font-bold uppercase tracking-widest text-forest">Step 2 of 3</p>
         <h1 className="mb-2 text-center font-serif text-4xl">Interview details</h1>
-        <p className="mb-8 text-center text-vast/75">Tell us who you are and what role you&apos;re aiming for.</p>
+        <p className="mb-6 text-center text-vast/75">Tell us who you are and what role you&apos;re aiming for.</p>
 
         <div className="mb-6 flex items-center justify-between gap-3 rounded-2xl border-2 border-vast/15 px-4 py-3 text-sm">
           {resume ? (
             <>
-              <span className="truncate">
-                <span className="mr-2 rounded-full bg-forest px-3 py-1 text-xs font-bold text-cream">Resume attached</span>
-                {resume.name}
+              <span className="flex min-w-0 items-center gap-2">
+                <span className="shrink-0 rounded-full bg-forest px-3 py-1 text-xs font-bold text-cream">Resume attached</span>
+                <span className="truncate">{resume.name}</span>
               </span>
               <button type="button" onClick={removeResume} className="shrink-0 font-semibold underline underline-offset-4">
                 Remove
@@ -101,67 +101,70 @@ export default function SetupForm() {
           )}
         </div>
 
-        <form onSubmit={handleStart} className="space-y-6">
-          <div>
-            <label htmlFor="full-name" className="mb-2 block font-semibold">Full name</label>
-            <input
-              id="full-name"
-              type="text"
-              required
-              maxLength={LIMITS.name}
-              autoComplete="name"
-              value={name}
-              onChange={(e) => setName(e.target.value)}
-              className="w-full rounded-xl border-2 border-vast bg-cream px-4 py-3 outline-none transition-colors focus:bg-white"
-              placeholder="Jane Doe"
-            />
-          </div>
-          <div>
-            <label htmlFor="target-role" className="mb-2 block font-semibold">Target role</label>
-            <input
-              id="target-role"
-              type="text"
-              required
-              maxLength={LIMITS.role}
-              value={role}
-              onChange={(e) => setRole(e.target.value)}
-              className="w-full rounded-xl border-2 border-vast bg-cream px-4 py-3 outline-none transition-colors focus:bg-white"
-              placeholder="Senior Frontend Engineer"
-            />
+        <form onSubmit={handleStart} className="space-y-5">
+          <div className="grid gap-5 sm:grid-cols-2">
+            <div>
+              <label htmlFor="full-name" className="mb-2 block font-semibold">Full name</label>
+              <input
+                id="full-name"
+                type="text"
+                required
+                maxLength={LIMITS.name}
+                autoComplete="name"
+                value={name}
+                onChange={(e) => setName(e.target.value)}
+                className="w-full rounded-xl border-2 border-vast bg-cream px-4 py-3 outline-none transition-shadow focus:border-forest focus:ring-4 focus:ring-forest/20"
+                placeholder="Jane Doe"
+              />
+            </div>
+            <div>
+              <label htmlFor="target-role" className="mb-2 block font-semibold">Target role</label>
+              <input
+                id="target-role"
+                type="text"
+                required
+                maxLength={LIMITS.role}
+                value={role}
+                onChange={(e) => setRole(e.target.value)}
+                className="w-full rounded-xl border-2 border-vast bg-cream px-4 py-3 outline-none transition-shadow focus:border-forest focus:ring-4 focus:ring-forest/20"
+                placeholder="Senior Frontend Engineer"
+              />
+            </div>
           </div>
           <div>
             <label htmlFor="job-description" className="mb-2 flex items-baseline justify-between font-semibold">
               <span>
-                Job description <span className="font-normal opacity-60">(optional)</span>
+                Job description <span className="font-normal text-vast/70">(optional)</span>
               </span>
-              <span className="text-xs font-normal opacity-50">
+              <span className="text-xs font-normal text-vast/70">
                 {jobDescription.length.toLocaleString()} / {LIMITS.jobDescriptionChars.toLocaleString()}
               </span>
             </label>
             <textarea
               id="job-description"
+              rows={3}
               value={jobDescription}
               maxLength={LIMITS.jobDescriptionChars}
               onChange={(e) => setJobDescription(e.target.value)}
-              className="min-h-32 w-full resize-y rounded-xl border-2 border-vast bg-cream px-4 py-3 outline-none transition-colors focus:bg-white"
+              className="min-h-24 w-full resize-y rounded-xl border-2 border-vast bg-cream px-4 py-3 outline-none transition-shadow focus:border-forest focus:ring-4 focus:ring-forest/20"
               placeholder="Paste the role's responsibilities and requirements for more targeted questions."
             />
           </div>
 
-          <fieldset>
-            <legend className="mb-2 block font-semibold">Interview focus</legend>
-            <Segmented
-              name="focus"
-              value={interviewType}
-              onChange={(v) => setInterviewType(v as typeof interviewType)}
-              options={[
-                { value: "mixed", label: "Mixed" },
-                { value: "technical", label: "Technical" },
-                { value: "behavioral", label: "Behavioral" },
-              ]}
-            />
-          </fieldset>
-          <div className="grid gap-6 sm:grid-cols-2">
+          <div className="grid gap-5 sm:grid-cols-2 lg:grid-cols-3">
+            <fieldset className="sm:col-span-2 lg:col-span-1">
+              <legend className="mb-2 block font-semibold">Interview focus</legend>
+              <Segmented
+                name="focus"
+                value={interviewType}
+                onChange={(v) => setInterviewType(v as typeof interviewType)}
+                options={[
+                  { value: "mixed", label: "Mixed" },
+                  { value: "technical", label: "Technical" },
+                  { value: "behavioral", label: "Behavioral" },
+                ]}
+              />
+            </fieldset>
             <fieldset>
               <legend className="mb-2 block font-semibold">Seniority</legend>
               <Segmented
@@ -199,7 +202,7 @@ export default function SetupForm() {
             />
             <span>
               <span className="block font-semibold">Hands-on canvas exercise</span>
-              <span className="text-sm text-vast/65">A role-specific problem opens mid-interview; work in the editor while you talk it through.</span>
+              <span className="text-sm text-vast/65">A role-specific problem opens mid-interview to solve in an editor as you talk.</span>
             </span>
           </label>
 
@@ -209,11 +212,11 @@ export default function SetupForm() {
             </p>
           )}
 
-          <div className="flex gap-4 pt-2">
+          <div className="flex gap-4">
             <Link href="/upload" className="btn-secondary flex-1">
               Back
             </Link>
-            <button type="submit" disabled={isLoading || !name.trim() || !role.trim()} className="btn-primary flex-1 disabled:opacity-60">
+            <button type="submit" disabled={isLoading} className="btn-primary flex-1 disabled:opacity-60">
               {isLoading ? "Starting…" : "Start interview"}
             </button>
           </div>
@@ -239,7 +242,7 @@ function Segmented({
       {options.map((option) => (
         <label
           key={option.value}
-          className={`flex-1 cursor-pointer rounded-lg px-2 py-1.5 text-center text-sm font-semibold transition-colors ${
+          className={`flex-1 cursor-pointer rounded-lg px-2 py-1.5 text-center text-sm font-semibold transition-colors has-[:focus-visible]:outline has-[:focus-visible]:outline-[3px] has-[:focus-visible]:outline-offset-2 has-[:focus-visible]:outline-ember ${
             value === option.value ? "bg-lavender" : "hover:bg-vast/5"
           }`}
         >

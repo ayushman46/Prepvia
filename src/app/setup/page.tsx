@@ -6,8 +6,27 @@ import dynamic from "next/dynamic";
 const SetupForm = dynamic(() => import("./SetupForm"), {
   ssr: false,
   loading: () => (
-    <main className="flex min-h-[100dvh] items-center justify-center bg-cream p-4 pt-28 text-vast">
-      <div className="card h-[640px] w-full max-w-lg animate-pulse p-6 md:p-12" aria-busy="true" aria-label="Loading interview details" />
+    <main className="flex min-h-[100dvh] items-center justify-center bg-cream p-4 pt-28 text-vast md:p-6 md:pt-[104px]">
+      <div className="card w-full max-w-3xl p-6 md:px-10 md:py-8" aria-busy="true" aria-label="Loading interview details">
+        <p className="mb-2 text-center text-sm font-bold uppercase tracking-widest text-forest">Step 2 of 3</p>
+        <h1 className="mb-2 text-center font-serif text-4xl">Interview details</h1>
+        <p className="mb-6 text-center text-vast/75">Tell us who you are and what role you&apos;re aiming for.</p>
+        <div className="animate-pulse space-y-5" aria-hidden>
+          <div className="h-12 rounded-2xl bg-vast/10" />
+          <div className="grid gap-5 sm:grid-cols-2">
+            <div className="h-[84px] rounded-xl bg-vast/10" />
+            <div className="h-[84px] rounded-xl bg-vast/10" />
+          </div>
+          <div className="h-32 rounded-xl bg-vast/10" />
+          <div className="grid gap-5 sm:grid-cols-2 lg:grid-cols-3">
+            <div className="h-[76px] rounded-xl bg-vast/10 sm:col-span-2 lg:col-span-1" />
+            <div className="h-[76px] rounded-xl bg-vast/10" />
+            <div className="h-[76px] rounded-xl bg-vast/10" />
+          </div>
+          <div className="h-16 rounded-xl bg-vast/10" />
+          <div className="h-14 rounded-xl bg-vast/10" />
+        </div>
+      </div>
     </main>
   ),
 });
