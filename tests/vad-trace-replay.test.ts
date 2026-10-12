@@ -76,4 +76,10 @@ describe("real user trace replay (listen-2026-10-12T13-48-15)", () => {
     // Same three the live run lost (rejected "short" at 11 s; no utterance at 37 s and 40.3 s).
     expect(lost).toEqual([11, 37, 40.3]);
   });
+
+  it("the nearVoice gate is what rescues them (0.4/0.3 thresholds alone are not enough)", () => {
+    const noNear = { ...SETTINGS, gate: { ...SETTINGS.gate, nearVoice: undefined } } as unknown as typeof SETTINGS;
+    const lost = attempts.filter((a) => !replay(a, noNear).some((v) => v.accepted)).map((a) => a.atS);
+    expect(lost).toEqual([11, 37, 40.3]);
+  });
 });
