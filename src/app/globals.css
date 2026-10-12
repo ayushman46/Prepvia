@@ -13,40 +13,133 @@
     --color-fog: #8a8a80;
     --color-charcoal: #222222;
     --color-pure-white: #ffffff;
+    /* Layered, warm-tinted shadows: a crisp contact edge plus a soft ambient fall-off. */
+    --shadow-card: 0 1px 0 rgba(26, 26, 26, 0.04), 0 2px 4px -1px rgba(26, 26, 26, 0.06),
+      0 12px 32px -12px rgba(60, 44, 20, 0.14), 0 32px 64px -32px rgba(3, 79, 70, 0.12);
+    --shadow-btn: 0 1px 0 rgba(26, 26, 26, 0.06), 0 4px 10px -4px rgba(60, 44, 20, 0.22);
+    --shadow-btn-hover: 0 2px 0 rgba(26, 26, 26, 0.08), 0 10px 22px -8px rgba(120, 70, 170, 0.35);
+    --shadow-btn-active: 0 0 0 rgba(26, 26, 26, 0), 0 2px 4px -2px rgba(26, 26, 26, 0.25);
     color-scheme: light;
   }
 
   html {
     scroll-behavior: smooth;
+    -webkit-text-size-adjust: 100%;
+    text-size-adjust: 100%;
   }
 
   body {
     background-color: var(--color-lumen-cream);
+    /* Soft lavender + ember glows and a whisper of paper grain on the cream page. */
+    background-image:
+      radial-gradient(60rem 36rem at 12% -8%, rgba(240, 215, 255, 0.55), transparent 70%),
+      radial-gradient(44rem 30rem at 100% 0%, rgba(255, 169, 70, 0.12), transparent 70%),
+      url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='160' height='160'%3E%3Cfilter id='n'%3E%3CfeTurbulence type='fractalNoise' baseFrequency='0.9' numOctaves='2' stitchTiles='stitch'/%3E%3CfeColorMatrix values='0 0 0 0 0.1 0 0 0 0 0.1 0 0 0 0 0.08 0 0 0 0.045 0'/%3E%3C/filter%3E%3Crect width='100%25' height='100%25' filter='url(%23n)'/%3E%3C/svg%3E");
+    background-repeat: no-repeat, no-repeat, repeat;
     color: var(--color-vast-ink);
     -webkit-font-smoothing: antialiased;
+    -moz-osx-font-smoothing: grayscale;
+    text-rendering: optimizeLegibility;
+    font-feature-settings: "kern", "liga", "calt";
+  }
+
+  /* Serif display type: slightly tighter tracking and balanced line breaks. */
+  h1,
+  h2,
+  h3,
+  .font-serif {
+    letter-spacing: -0.012em;
+    font-feature-settings: "kern", "liga", "dlig";
+  }
+  h1,
+  h2,
+  h3 {
+    text-wrap: balance;
+  }
+  p {
+    text-wrap: pretty;
+  }
+
+  /* Timers, scores and counters don't jitter as digits change. */
+  time,
+  kbd,
+  progress,
+  meter,
+  [role="timer"],
+  [role="progressbar"],
+  .tabular-nums {
+    font-variant-numeric: tabular-nums;
+  }
+
+  ::selection {
+    background-color: rgba(240, 215, 255, 0.9);
+    color: var(--color-vast-ink);
   }
 
   :focus-visible {
     outline: 3px solid var(--color-ember-glow);
-    outline-offset: 2px;
+    outline-offset: 3px;
+    border-radius: 6px;
+    box-shadow: 0 0 0 6px rgba(255, 169, 70, 0.18);
   }
 }
 
 @layer components {
   .btn-primary {
-    @apply inline-flex items-center justify-center gap-2 rounded-xl border-2 border-vast bg-lavender px-7 py-3.5 text-[17px] font-bold text-vast transition-transform hover:-translate-y-0.5 disabled:cursor-not-allowed disabled:hover:translate-y-0;
+    @apply inline-flex items-center justify-center gap-2 rounded-xl border-2 border-vast bg-lavender px-7 py-3.5 text-[17px] font-bold text-vast hover:-translate-y-0.5 disabled:cursor-not-allowed disabled:hover:translate-y-0;
+    letter-spacing: 0.005em;
+    box-shadow: var(--shadow-btn);
+    transition:
+      transform 180ms cubic-bezier(0.2, 0.8, 0.2, 1),
+      box-shadow 180ms cubic-bezier(0.2, 0.8, 0.2, 1),
+      background-color 180ms ease;
+  }
+  .btn-primary:hover:not(:disabled) {
+    background-color: #ead0fb;
+    box-shadow: var(--shadow-btn-hover);
+  }
+  .btn-primary:active:not(:disabled) {
+    transform: translateY(1px);
+    box-shadow: var(--shadow-btn-active);
+    transition-duration: 60ms;
   }
 
   .btn-secondary {
-    @apply inline-flex items-center justify-center gap-2 rounded-xl border-2 border-vast bg-cream px-7 py-3.5 text-[17px] font-bold text-vast transition-transform hover:-translate-y-0.5 disabled:cursor-not-allowed disabled:hover:translate-y-0;
+    @apply inline-flex items-center justify-center gap-2 rounded-xl border-2 border-vast bg-cream px-7 py-3.5 text-[17px] font-bold text-vast hover:-translate-y-0.5 disabled:cursor-not-allowed disabled:hover:translate-y-0;
+    letter-spacing: 0.005em;
+    transition:
+      transform 180ms cubic-bezier(0.2, 0.8, 0.2, 1),
+      box-shadow 180ms cubic-bezier(0.2, 0.8, 0.2, 1),
+      background-color 180ms ease;
+  }
+  .btn-secondary:hover:not(:disabled) {
+    background-color: #ffffff;
+    box-shadow: var(--shadow-btn);
+  }
+  .btn-secondary:active:not(:disabled) {
+    transform: translateY(1px);
+    box-shadow: none;
+    transition-duration: 60ms;
   }
 
   .icon-btn {
-    @apply flex h-10 w-10 items-center justify-center rounded-xl border-2 border-vast bg-cream text-vast transition-colors hover:bg-cream/90;
+    @apply flex h-10 w-10 items-center justify-center rounded-xl border-2 border-vast bg-cream text-vast hover:bg-cream/90;
+    transition:
+      background-color 160ms ease,
+      transform 160ms cubic-bezier(0.2, 0.8, 0.2, 1),
+      box-shadow 160ms ease;
+  }
+  .icon-btn:hover:not(:disabled) {
+    background-color: #ffffff;
+    box-shadow: var(--shadow-btn);
+  }
+  .icon-btn:active:not(:disabled) {
+    transform: scale(0.96);
   }
 
   .card {
     @apply rounded-[32px] border-2 border-vast bg-cream;
+    box-shadow: var(--shadow-card);
   }
 }
 
@@ -58,7 +151,17 @@
   *::before,
   *::after {
     animation-duration: 0.01ms !important;
+    animation-iteration-count: 1 !important;
     transition-duration: 0.01ms !important;
+  }
+  .btn-primary:hover,
+  .btn-secondary:hover,
+  .icon-btn:active {
+    transform: none !important;
+  }
+  .orb-core,
+  .orb-halo {
+    transition: none !important;
   }
 }
 
@@ -121,6 +224,12 @@
   html,
   body {
     background: #ffffff !important;
+  }
+  .card,
+  .btn-primary,
+  .btn-secondary,
+  .icon-btn {
+    box-shadow: none !important;
   }
   /* Light, compact cards on paper instead of heavy cream panels with thick black borders. */
   .card {
