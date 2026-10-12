@@ -80,7 +80,7 @@ const STEP_DETAILS = [
 ];
 
 export function generationDetail(elapsedMs: number, retrying: boolean): string {
-  if (retrying) return "Our AI reviewer was busy, so we're retrying automatically. No need to do anything.";
+  if (retrying) return "Our AI reviewer was busy, so we're trying again automatically. No need to do anything.";
   if (elapsedMs > 75_000) return "Almost there. Thorough reports can take up to two minutes.";
   return STEP_DETAILS[generationStep(elapsedMs)];
 }
