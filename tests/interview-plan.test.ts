@@ -186,7 +186,8 @@ describe("isEndRequest", () => {
       "end the interview",
       "Let's end the interview now.",
       "I want to stop the interview.",
-      "I'm done.",
+      "I'm done for today.",
+      "I'm done with the interview.",
       "Let's finish here.",
       "Thank you for the time. I'll end the interview now.",
       "Thank you for the opportunity; I'm ending the interview now.",
@@ -213,6 +214,8 @@ describe("isEndRequest", () => {
     const { isEndRequest } = await import("@/server/interview-plan");
     for (const text of [
       "Can we just stop here? I'm kind of tired.",
+      "I'm done.",
+      "I'm finished.",
       "I'd stop the consumer, drain the queue, then end the migration window.",
       "We decided to end support for the old API after the interview loop with customers showed low usage.",
       "",

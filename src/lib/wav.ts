@@ -30,3 +30,18 @@ export function encodeWav(samples: Float32Array, sampleRate = 16_000): Blob {
 
 /** Max utterance length accepted by the server (~4 MB of 16 kHz PCM). */
 export const MAX_UTTERANCE_SECONDS = 120;
+
+/** Join WAVs made by `encodeWav` (same format) into one, with a short silence between them. */
+export async function concatWav(blobs: Blob[], gapSeconds = 0.3, sampleRate = 16_000): Promise<Blob> {
+  const parts = await Promise.all(blobs.map(async (blob) => new Int16Array((await blob.arrayBuffer()).slice(44))));
+  const gap = Math.round(gapSeconds * sampleRate);
+  const total = parts.reduce((n, part) => n + part.length, 0) + gap * Math.max(0, parts.length - 1);
+  const samples = new Float32Array(total);
+  let offset = 0;
+  parts.forEach((part, i) => {
+    if (i > 0) offset += gap;
+    for (let j = 0; j < part.length; j++) samples[offset + j] = part[j] / 0x8000;
+    offset += part.length;
+  });
+  return encodeWav(samples, sampleRate);
+}

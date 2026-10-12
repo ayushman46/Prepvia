@@ -289,7 +289,7 @@ try {
     console.log(`  answer detected: ${detected}${detected ? ` → "${users.at(-1).slice(0, 120)}"` : ""}`);
     for (let i = 0; i < 30 && !/Your turn/.test(await statusText()); i++) await sleep(500);
     await page.screenshot({ path: join(process.env.SHOT_DIR || "/tmp", `realmic-${STT}-answer${n + 1}.png`) });
-    const banner = (await page.locator("body").innerText({ timeout: 2_000 }).catch(() => "")).match(/(Speech recognition[^\n]*|Didn't catch that[^\n]*|We couldn't transcribe[^\n]*|The interviewer is having trouble[^\n]*|Microphone[^\n]*blocked[^\n]*)/);
+    const banner = (await page.locator("body").innerText({ timeout: 2_000 }).catch(() => "")).match(/(Speech recognition[^\n]*|(?:Sorry, )?[Ii] didn't catch that[^\n]*|We couldn't transcribe[^\n]*|The interviewer is having trouble[^\n]*|Microphone[^\n]*blocked[^\n]*)/);
     console.log(`  status: ${await statusText()}${banner ? ` | message: ${banner[0]}` : ""}`);
   }
   const visible = async (id) => page.getByTestId(id).isVisible().catch(() => false);

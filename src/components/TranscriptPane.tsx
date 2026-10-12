@@ -20,10 +20,12 @@ function TypingDots() {
 
 export function TranscriptPane({ messages, candidateName }: { messages: ChatMessage[]; candidateName?: string }) {
   const scrollRef = useRef<HTMLDivElement>(null);
+  /** Follow new messages only while the candidate is reading the latest ones (not scrolled up). */
+  const followRef = useRef(true);
 
   useEffect(() => {
     const el = scrollRef.current;
-    if (el) el.scrollTo({ top: el.scrollHeight, behavior: "smooth" });
+    if (el && followRef.current) el.scrollTo({ top: el.scrollHeight, behavior: "smooth" });
   }, [messages]);
 
   return (
@@ -33,6 +35,10 @@ export function TranscriptPane({ messages, candidateName }: { messages: ChatMess
       role="log"
       aria-live="polite"
       aria-label="Interview transcript"
+      onScroll={(event) => {
+        const el = event.currentTarget;
+        followRef.current = el.scrollHeight - el.scrollTop - el.clientHeight < 120;
+      }}
     >
       {messages.length === 0 && (
         <p className="pt-6 text-center text-cream/60">Aria will greet you once you start.</p>
@@ -45,12 +51,24 @@ export function TranscriptPane({ messages, candidateName }: { messages: ChatMess
           <div
             data-testid={message.role === "user" ? "msg-user" : "msg-ai"}
             data-interrupted={message.interrupted ? "true" : undefined}
+            data-pending={message.pending ? "true" : undefined}
             className={cn(
               "max-w-[88%] rounded-[24px] border-2 border-vast px-5 py-3 text-base leading-relaxed md:max-w-[80%] md:text-lg",
               message.role === "user" ? "rounded-br-md bg-lavender text-vast" : "rounded-bl-md bg-cream text-vast",
             )}
           >
             {message.pending && !message.content ? <TypingDots /> : message.content}
+            {message.pending && message.content && message.role === "user" && (
+              <span className="ml-2 align-middle">
+                <TypingDots />
+              </span>
+            )}
+            {message.unspoken && (
+              <span className="text-vast/45 italic" title="Not spoken: you interrupted Aria">
+                {message.content ? " " : ""}
+                {message.unspoken}
+              </span>
+            )}
             {message.interrupted && <span className="ml-2 text-xs font-semibold uppercase tracking-wider text-vast/45">interrupted</span>}
           </div>
         </div>

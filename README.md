@@ -40,6 +40,8 @@ Candidates can upload a PDF resume, enter their name and target role, and paste 
 
 The browser uses local Silero voice activity detection to capture natural utterances. Candidates speak (typing is available as a fallback), hear the interviewer respond, and see a live transcript. A noise gate ignores clicks, coughs and distant voices; in a noisy room, **push-to-talk** (hold Space or the on-screen button while answering) is one click away, and the room suggests it when it keeps hearing background sound.
 
+Answers are captured whole. The end of an answer is decided from what was said, not from silence alone: a finished sentence gets a reply after 0.8 s, while a pause after "…and", "um" or "let me think" keeps listening (up to 2.2 s, or 5 s when the candidate asks for time). If the candidate keeps talking after their answer was sent, Aria holds her reply, the continuation is added to the same answer, and she responds to the whole thing. One-word answers ("No.") are heard, answers longer than two minutes are sent in parts instead of being cut, and ending the interview mid-sentence still saves what was said. Speech-to-text is primed with the interview's technical vocabulary (from the role, job description and resume), so terms like "idempotency" and "Postgres" are transcribed correctly. The lobby has a microphone check with a live level meter and a device picker.
+
 ### Adaptive, Time-Boxed Interviewing
 
 The interviewer, Aria, runs a structured interview against the clock: introduction, resume deep-dive, technical depth, a hands-on canvas exercise, behavioral questions, and a wrap-up where the candidate can ask questions. Each session keeps compact interview state and evidence memory (claims, strong and weak areas, competencies), so follow-ups build on what the candidate actually said.
@@ -198,10 +200,11 @@ npm run dev                  # http://localhost:3000  (microphone requires local
 
 If speaking does nothing:
 
-1. **Open `/api/health`.** `"stt": "invalid_key"` means the Groq key is wrong (create a new one at console.groq.com and set `GROQ_API_KEY`); the room switches to typing and says so after the first spoken answer.
-2. **Read the message under the transcript.** The room names the cause: microphone permission denied, blocked by the operating system (macOS: System Settings › Privacy & Security › Microphone), no microphone found, microphone busy (another app such as Zoom or Teams), or no sound from the microphone. Each has a "try again" or "restart microphone" button.
-3. **Background voices or noise?** If other people are talking near you, switch to push-to-talk ("Noisy room? Use push-to-talk" under the transcript, or the checkbox in the lobby) and hold Space while you answer.
-4. **Testing locally:** `npm run test:real-mic -- --stt=fake` speaks answers out loud through your speakers into your real microphone and reports what the app detects (see the script header for its modes).
+1. **Open `/api/health`.** `"stt": "invalid_key"` means the Groq key is wrong (create a new one at console.groq.com and set `GROQ_API_KEY`); the lobby already says voice answers are unavailable and the room uses typing.
+2. **Use "Check my microphone" in the lobby.** The level bar should move and say "We can hear you" when you talk; if you have several microphones (AirPods, a headset), pick the right one there.
+3. **Read the message under the transcript.** The room names the cause: microphone permission denied, blocked by the operating system (macOS: System Settings › Privacy & Security › Microphone), no microphone found, microphone busy (another app such as Zoom or Teams), or no sound from the microphone. Each has a "try again" or "restart microphone" button.
+4. **Background voices or noise?** If other people are talking near you, switch to push-to-talk ("Noisy room? Use push-to-talk" under the transcript, or the checkbox in the lobby) and hold Space while you answer.
+5. **Testing locally:** `npm run test:real-mic -- --stt=fake` speaks answers out loud through your speakers into your real microphone and reports what the app detects (see the script header for its modes).
 
 ## Verification
 
@@ -211,6 +214,7 @@ npm run build             # production build (what Vercel runs)
 npm run test:e2e          # API e2e: production server + real MongoDB + real Edge TTS + simulated LLM/STT, timed sections at 60x
 npm run test:live-browser # LIVE: Chromium + fake mic + real VAD/NVIDIA/Edge TTS/MongoDB; latency, captions, barge-in, push-to-talk, canvas, report
 npm run test:real-mic     # LIVE, manual: your real microphone + speakers (macOS `say`); hands-free, push-to-talk, sensitivity, next dev
+npm run test:audio-capture # LIVE: 21 spoken answers (voices, speeds, quiet, noise, thinking pauses, 1-word, 2-minute) → audio coverage + real Whisper WER
 npm run test:quality      # LIVE: LLM-simulated candidates (5 personas) + deterministic checks + LLM judge on real NVIDIA
 node tests/load/run.mjs --users=50 --turns=8 --tts=off   # concurrency, tail latency, data integrity
 npm run test:live         # Edge TTS pool against the real service

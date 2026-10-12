@@ -99,14 +99,41 @@ describe("transcribeAudio", () => {
     expect(fetchMock).toHaveBeenCalledTimes(1); // no retry, and no call while the key is known bad
   });
 
-  it("does not retry a rate limit and honours Retry-After", async () => {
+  it("does not wait out a long rate limit and honours Retry-After", async () => {
     process.env.GROQ_API_KEY = "gq";
-    const fetchMock = vi.fn(async () => new Response("slow down", { status: 429, headers: { "retry-after": "3" } }));
+    const fetchMock = vi.fn(async () => new Response("slow down", { status: 429, headers: { "retry-after": "30" } }));
     vi.stubGlobal("fetch", fetchMock);
     const error = (await transcribeAudio(await wavBytes(1)).catch((e) => e)) as SttError;
-    expect(error).toMatchObject({ reason: "rate_limited", retryAfterMs: 3_000 });
+    expect(error).toMatchObject({ reason: "rate_limited", retryAfterMs: 30_000 });
     await expect(transcribeAudio(await wavBytes(1))).rejects.toMatchObject({ reason: "rate_limited" });
     expect(fetchMock).toHaveBeenCalledTimes(1);
+  });
+
+  it("speculative calls fail fast on a rate limit, but a real answer waits out a short one", async () => {
+    process.env.GROQ_API_KEY = "gq";
+    let calls = 0;
+    const fetchMock = vi.fn(async () =>
+      ++calls === 1 ? new Response("slow down", { status: 429, headers: { "retry-after": "1" } }) : Response.json({ text: "My answer." }),
+    );
+    vi.stubGlobal("fetch", fetchMock);
+    const audio = await wavBytes(1);
+    await expect(transcribeAudio(audio, { speculative: true })).rejects.toMatchObject({ reason: "rate_limited", retryAfterMs: 1_000 });
+    await expect(transcribeAudio(audio, { speculative: true })).rejects.toMatchObject({ reason: "rate_limited" });
+    expect(await transcribeAudio(audio)).toBe("My answer."); // not lost: waited ~1 s, then transcribed
+    expect(fetchMock).toHaveBeenCalledTimes(2);
+  });
+
+  it("primes Whisper with the interview's technical vocabulary", async () => {
+    const { vocabularyPrompt } = await import("@/server/stt");
+    const prompt = vocabularyPrompt({
+      target_role: "Senior Backend Engineer",
+      job_description: "Own payments services in Go with PostgreSQL and gRPC.",
+      resume_text: "Built idempotent APIs on AWS Lambda with Node.js, DynamoDB and Kafka; p99 under 200ms.",
+    });
+    expect(prompt.startsWith("Senior Backend Engineer interview.")).toBe(true);
+    for (const term of ["PostgreSQL", "gRPC", "AWS", "Node.js", "DynamoDB", "Kafka", "p99", "idempotency"]) expect(prompt).toContain(term);
+    expect(prompt).not.toMatch(/\b(Own|Built|services)\b/);
+    expect(prompt.length).toBeLessThanOrEqual(600);
   });
 
   it("treats a clip Groq can't decode as nothing heard, but not a rejected model", async () => {
@@ -285,5 +312,27 @@ describe("withoutUnassessedHandsOn", () => {
     expect(filtered.competency_scores.map((c) => c.name)).toEqual(["Communication"]);
     expect(filtered.hands_on).toBeNull();
     expect(withoutUnassessedHandsOn(report, true).competency_scores).toHaveLength(3);
+  });
+});
+
+describe("client audio helpers", () => {
+  it("joins recorded answers into one WAV with a short gap", async () => {
+    const { concatWav, encodeWav } = await import("@/lib/wav");
+    const a = encodeWav(new Float32Array(16_000).fill(0.5));
+    const b = encodeWav(new Float32Array(8_000).fill(-0.25));
+    const joined = new DataView(await (await concatWav([a, b], 0.3)).arrayBuffer());
+    const samples = (joined.byteLength - 44) / 2;
+    expect(samples).toBe(16_000 + 4_800 + 8_000);
+    expect(joined.getUint32(40, true)).toBe(samples * 2); // header matches the data
+    expect(joined.getInt16(44, true)).toBeCloseTo(0.5 * 0x7fff, -1);
+    expect(joined.getInt16(44 + (16_000 + 100) * 2, true)).toBe(0); // the gap is silent
+    expect(joined.getInt16(44 + (16_000 + 4_800) * 2, true)).toBeCloseTo(-0.25 * 0x8000, -1);
+  });
+
+  it("gives up on a slow speculative transcript at the deadline", async () => {
+    const { withDeadline } = await import("@/lib/api");
+    expect(await withDeadline(Promise.resolve("ok"), 50)).toBe("ok");
+    expect(await withDeadline(Promise.reject(new Error("x")), 50)).toBeNull();
+    expect(await withDeadline(new Promise(() => undefined), 20)).toBeNull();
   });
 });

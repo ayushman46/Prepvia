@@ -24,16 +24,23 @@ import {
 import type { ChatMessage } from "./interview-context";
 import { LlmError, streamCompletion, streamSentences } from "./llm";
 import { logger } from "./logger";
-import { appendTranscript, getTranscripts, type SessionDoc, type TurnSessionUpdate } from "./sessions";
+import { sessionPrompt } from "./stt-vocabulary";
+import { amendLastAnswer, appendTranscript, getTranscripts, markLastReplyHeard, type SessionDoc, type TurnSessionUpdate } from "./sessions";
 import { SttError, transcribeAudio } from "./stt";
 import { synthesizeSentence } from "./tts";
 
-export type TurnInput =
+export type TurnInput = (
   | { kind: "audio"; audio: Uint8Array }
   /** `voice`: the text came from speech recognition in the browser (speculative STT). */
   | { kind: "text"; text: string; voice?: boolean }
-  /** No new answer: open the interview, or retry a reply that previously failed. */
-  | { kind: "continue" };
+  /** No new answer: open the interview, retry a reply that previously failed, or close it when time is up. */
+  | { kind: "continue" }
+) & {
+  /** The candidate continued their last answer before hearing the reply: merge, and replace that reply. */
+  amend?: boolean;
+  /** The candidate interrupted the previous reply after hearing this much of it. */
+  heard?: string;
+};
 
 export type TurnResult = {
   /** Present when a candidate answer should be analyzed in the background. */
@@ -81,14 +88,31 @@ export function sttErrorEvent(error: SttError): TurnEvent {
   return { type: "error", code: "stt_failed", message: "We couldn't transcribe that answer. Please try saying it again.", retryable: true };
 }
 
-/** True when a transcribed "answer" is mostly the interviewer's own last words. */
+const FIRST_PERSON = new Set(["i", "me", "my", "mine", "we", "us", "our", "ours"]);
+
+/**
+ * True when a transcribed "answer" is mostly the interviewer's own last words played
+ * back through the speakers: nearly all of its words, in the same order, and no
+ * first-person words of its own. A candidate restating the question ("I would design
+ * a rate limiter for the payments API") speaks as "I" and is never discarded.
+ */
 export function isEcho(userText: string, lastAi: string): boolean {
   const words = (text: string) => text.toLowerCase().replace(/[^a-z0-9 ]+/g, " ").split(/\s+/).filter(Boolean);
   const said = words(userText);
-  const spoken = new Set(words(lastAi));
+  const aiWords = words(lastAi);
+  const spoken = new Set(aiWords);
   if (said.length < 4) return false;
+  if (said.some((word) => FIRST_PERSON.has(word) && !spoken.has(word))) return false;
   const contained = said.filter((word) => spoken.has(word)).length / said.length;
-  return contained >= 0.85;
+  if (contained < 0.85) return false;
+  // Longest common subsequence: an echo keeps the interviewer's word order.
+  let previous = new Array<number>(aiWords.length + 1).fill(0);
+  for (const word of said) {
+    const row = new Array<number>(aiWords.length + 1).fill(0);
+    for (let j = 1; j <= aiWords.length; j++) row[j] = word === aiWords[j - 1] ? previous[j - 1] + 1 : Math.max(previous[j], row[j - 1]);
+    previous = row;
+  }
+  return previous[aiWords.length] / said.length >= 0.75;
 }
 
 function lastInterviewerQuestion(history: TranscriptEntry[]): string {
@@ -353,11 +377,15 @@ export async function runTurn(
   const maxTurns = config.limits.maxTurnsPerSession;
 
   // ---- 1. Transcribe (in parallel with loading the conversation) ----------
-  const historyPromise = getTranscripts(sessionId);
+  // What the candidate heard of an interrupted reply is recorded first, so the
+  // conversation below (and later the report) reads that reply as heard.
+  const historyPromise = (input.heard !== undefined ? markLastReplyHeard(sessionId, input.heard).catch(() => undefined) : Promise.resolve()).then(() =>
+    getTranscripts(sessionId),
+  );
   let userText = "";
   if (input.kind === "audio") {
     try {
-      userText = await transcribeAudio(input.audio);
+      userText = await transcribeAudio(input.audio, { prompt: sessionPrompt(sessionId, session) });
       metrics.stt_ms = since();
     } catch (error) {
       await historyPromise.catch(() => undefined);
@@ -404,7 +432,20 @@ export async function runTurn(
   let hasNewAnswer = false;
   const opening = history.length === 0 && !userText;
 
-  if (userText) {
+  const amended = userText && input.amend ? await amendLastAnswer(sessionId, userText, LIMITS.answerChars) : null;
+  const unheardReplies: string[] = [];
+  let timeUp = false;
+  if (amended !== null) {
+    // A continuation of the last answer: the reply to its first part was never heard
+    // (deleted with the amend), so the interviewer answers the whole answer now.
+    while (history.length && history[history.length - 1].role === "ai") unheardReplies.push(history.pop()!.content);
+    if (history.length) history[history.length - 1] = { role: "user", content: amended };
+    else history.push({ role: "user", content: amended });
+    previousQuestion = lastInterviewerQuestion(history.slice(0, -1));
+    answerForAnalysis = amended;
+    emit({ type: "user_transcript", content: amended });
+    hasNewAnswer = true;
+  } else if (userText) {
     emit({ type: "user_transcript", content: userText });
     // Persist without blocking generation; awaited before the reply is saved.
     persistAnswer = appendTranscript(sessionId, "user", userText);
@@ -418,17 +459,27 @@ export async function runTurn(
     answerForAnalysis = history[history.length - 1].content;
     previousQuestion = lastInterviewerQuestion(history.slice(0, -1));
     hasNewAnswer = true;
+  } else if (!session.ended_at && elapsedSince(session.started_at) * testing.clockSpeedup >= plan.duration_minutes * 60_000) {
+    // Time is up and the candidate is silent: close the interview instead of waiting forever.
+    timeUp = true;
   } else {
     emit({ type: "done" });
     return result;
   }
 
   const state = stateFromSession(session);
+  const lastAsked = state.questions_asked[state.questions_asked.length - 1];
+  if (unheardReplies.length && lastAsked && unheardReplies.some((reply) => clip(reply, 1_500) === lastAsked.question)) {
+    // The unheard reply was counted as a question: un-count it (the replacement is counted instead).
+    state.question_number = Math.max(0, state.question_number - 1);
+    state.questions_asked = state.questions_asked.slice(0, -1);
+    sessionUpdate.questionsAsked = state.questions_asked;
+  }
   const elapsedMs = opening ? 0 : elapsedSince(session.started_at) * testing.clockSpeedup;
-  const answeredTurns = turnCount + (userText ? 1 : 0);
+  const answeredTurns = turnCount + (userText && amended === null ? 1 : 0);
   // An explicit "end the interview" closes it now (the report button appears).
   const endRequested = hasNewAnswer && isEndRequest(answerForAnalysis);
-  const forceClose = answeredTurns >= maxTurns || endRequested;
+  const forceClose = answeredTurns >= maxTurns || endRequested || timeUp;
   let section = currentSection(plan, elapsedMs, state.question_number);
   let canvasMissing = false;
   if (section === "hands_on" && !session.canvas?.task) {
@@ -464,7 +515,9 @@ export async function runTurn(
   });
   metrics.section = forceClose ? "closing" : section;
   const includeCanvas = !!session.canvas?.introduced_at || !!introduceCanvas;
-  const liveContext = buildInterviewContext(session, history, true, { includeCanvas });
+  // After a withdrawn (unheard) reply, the interviewer's own notes must not list it as asked.
+  const contextSession = sessionUpdate.questionsAsked ? { ...session, interview_state: { ...session.interview_state, ...state } } : session;
+  const liveContext = buildInterviewContext(contextSession, history, true, { includeCanvas });
   const messages = buildLiveMessages(liveContext, instruction, history);
   // Only the candidate's latest message: the reply being copied is often the previous one.
   const reducedMessages = buildLiveMessages(liveContext, instruction, history.slice(-1));
@@ -597,6 +650,7 @@ export async function runTurn(
     !fullText.includes("?") &&
     /\b(take care|best of luck|good luck|goodbye|that'?s all the time|this concludes|interview is (now )?(complete|over|finished)|have a (great|good|wonderful) (day|evening|one))\b/i.test(fullText);
   const ended = closes || farewell;
+  if (ended) sessionUpdate.ended = true;
   const update = recordQuestion(state, fullText);
   await appendTranscript(sessionId, "ai", fullText);
   sessionUpdate.question = repeatRequested ? null : update;

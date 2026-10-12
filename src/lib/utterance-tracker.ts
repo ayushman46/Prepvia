@@ -27,13 +27,26 @@ export type GateOptions = {
   minSnrDb: number;
   /** Absolute minimum RMS for a loud frame. */
   minSpeechRms: number;
+  /**
+   * A single crisp word ("No.") passes with a shorter unbroken run of confident
+   * speech when it is clearly close to the microphone: this far above the floor.
+   */
+  shortWord?: { minRun: number; minSnrDb: number };
 };
 
 export type TrackerOptions = {
   frameMs: number;
   positiveThreshold: number;
   negativeThreshold: number;
+  /** Silence that ends an utterance until `endpoint()` decides otherwise for the current pause. */
   redemptionMs: number;
+  /** Silence that ends an utterance when a pause gets no speculation (nothing to decide from). */
+  fallbackRedemptionMs?: number;
+  /**
+   * The tracker changed the end-of-utterance silence. Apply the same value to the
+   * VAD before its next frame so the two stay in step (vad-web's setOptions).
+   */
+  onRedemptionChange?: (ms: number) => void;
   preSpeechPadMs: number;
   minSpeechMs: number;
   speculateAfterMs: number;
@@ -60,6 +73,8 @@ export type UtteranceVerdict = {
   speculationId: number | null;
   /** Samples in the utterance, to match it with the VAD's audio. */
   samples: number;
+  /** Trailing silence that ended the utterance (the candidate stopped talking this long ago). */
+  silenceMs: number;
 };
 
 const FLOOR_MIN_DB = -60; // RMS 0.001
@@ -105,9 +120,15 @@ export class UtteranceTracker {
   private heardFrames = 0;
   private heardRun = 0;
   private heardMaxRun = 0;
+  /** Loudest confident frame relative to the noise floor (dB), with and without the floor. */
+  private peakSnrDb = -Infinity;
+  private heardPeakSnrDb = -Infinity;
   private frameIndex = 0;
   private speculationFrames: number[] = [];
-  private readonly redemptionFrames: number;
+  private redemptionFrames: number;
+  private redemptionMs: number;
+  private pendingRedemptionMs: number | null = null;
+  private inFrame = false;
   private readonly padFrames: number;
   private readonly minSpeechFrames: number;
   private readonly speculateFrames: number;
@@ -115,11 +136,27 @@ export class UtteranceTracker {
 
   constructor(private readonly options: TrackerOptions) {
     // Same rounding as @ricky0123/vad-web's calculateFrameParams.
+    this.redemptionMs = options.redemptionMs;
     this.redemptionFrames = Math.floor(options.redemptionMs / options.frameMs);
     this.padFrames = Math.floor(options.preSpeechPadMs / options.frameMs);
     this.minSpeechFrames = Math.floor(options.minSpeechMs / options.frameMs);
     this.speculateFrames = Math.max(1, Math.ceil(options.speculateAfterMs / options.frameMs));
     this.minuteFrames = Math.round(60_000 / options.frameMs);
+  }
+
+  /** Silence that currently ends an utterance. */
+  get currentRedemptionMs(): number {
+    return this.redemptionMs;
+  }
+
+  /** An utterance is in progress (the VAD heard speech-like sound and hasn't ended it). */
+  get inUtterance(): boolean {
+    return this.speaking;
+  }
+
+  /** The current utterance already sounds like real close speech (it would be "heard"). */
+  get hearing(): boolean {
+    return this.speaking && this.heard();
   }
 
   /** Current estimate of the room's background level (RMS). */
@@ -129,6 +166,22 @@ export class UtteranceTracker {
 
   /** Feed every processed frame (16 kHz) with its speech probability; `level` is its RMS if already known. */
   frame(probability: number, frame: Float32Array, level = rms(frame)): void {
+    // The VAD checks this frame against its own redemption after we return, so a
+    // change decided while processing a frame takes effect (for both) on the next one.
+    if (this.pendingRedemptionMs !== null) {
+      const ms = this.pendingRedemptionMs;
+      this.pendingRedemptionMs = null;
+      this.applyRedemption(ms);
+    }
+    this.inFrame = true;
+    try {
+      this.step(probability, frame, level);
+    } finally {
+      this.inFrame = false;
+    }
+  }
+
+  private step(probability: number, frame: Float32Array, level: number): void {
     this.frameIndex++;
     const isSpeech = probability >= this.options.positiveThreshold;
     this.frames.push({ frame, isSpeech });
@@ -144,48 +197,44 @@ export class UtteranceTracker {
       this.speechFrames++;
       this.redemption = 0;
       if (this.speculatedThisPause) {
-        // The candidate kept talking: the speculative transcript is incomplete.
+        // The candidate kept talking: the speculative transcript is incomplete, and
+        // the next pause gets its own end-of-turn decision.
         this.speculatedThisPause = false;
         this.speculationValid = false;
         this.cancelSpeculation();
+        this.setRedemption(this.options.redemptionMs);
       }
     }
     if (isSpeech && !this.speaking) this.speaking = true;
     if (this.speaking) this.updateGate(probability, db);
+    if (!isSpeech && this.speculationValid && probability >= this.options.negativeThreshold && this.isLoud(db)) {
+      // Soft words after the speculation point (between the two thresholds) don't
+      // reset the pause, but the speculative transcript would miss them: transcribe
+      // the whole utterance instead, and end the pause on the fixed fallback.
+      this.speculationValid = false;
+      this.cancelSpeculation();
+      this.setRedemption(this.options.fallbackRedemptionMs ?? this.options.redemptionMs);
+    }
 
     if (probability < this.options.negativeThreshold && this.speaking) {
       this.redemption++;
       if (this.redemption >= this.redemptionFrames) {
         // The VAD ends the utterance on this frame (speech end or misfire).
-        const enough = this.frames.filter((f) => f.isSpeech).length >= this.minSpeechFrames;
-        const accepted = this.passes();
-        const speculationId = accepted && enough && this.speculationValid ? this.speculationId : null;
-        if (this.speculationId !== null && this.speculationId !== speculationId) this.cancelSpeculation();
-        this.ended = {
-          accepted,
-          heard: this.heard(),
-          reason: accepted ? "ok" : this.faintFrames >= (this.options.gate?.minConfidentFrames ?? 0) ? "quiet" : "short",
-          speculationId,
-          samples: this.frames.reduce((n, f) => n + f.frame.length, 0),
-        };
-        this.speculationId = null; // handed over (or cancelled) above
-        this.clearSegment();
+        this.ended = this.finishSegment();
         return;
       }
-      if (
-        this.redemption >= this.speculateFrames &&
-        !this.speculatedThisPause &&
-        this.speechFrames >= this.minSpeechFrames &&
-        this.passes() &&
-        this.withinBudget()
-      ) {
+      if (this.redemption >= this.speculateFrames && !this.speculatedThisPause) {
+        // One decision per pause: transcribe what was said so far (endpoint() then
+        // decides how long to wait), or fall back to a fixed silence.
         this.speculatedThisPause = true;
-        if (this.options.shouldSpeculate?.() ?? true) {
+        if (this.speechFrames >= this.minSpeechFrames && this.passes() && this.withinBudget() && (this.options.shouldSpeculate?.() ?? true)) {
           this.cancelSpeculation(); // an earlier, now incomplete speculation of this utterance
           this.speculationId = ++this.nextId;
           this.speculationValid = true;
           this.speculationFrames.push(this.frameIndex);
           this.options.onSpeculate(concat(this.frames.map((f) => f.frame)), this.speculationId);
+        } else {
+          this.setRedemption(this.options.fallbackRedemptionMs ?? this.options.redemptionMs);
         }
       }
     }
@@ -203,6 +252,14 @@ export class UtteranceTracker {
     return ended;
   }
 
+  /**
+   * End the utterance in progress now, as the VAD does when it pauses with its audio
+   * submitted (e.g. the candidate ended the interview mid-sentence). Null if none.
+   */
+  endNow(): UtteranceVerdict | null {
+    return this.speaking ? this.finishSegment() : null;
+  }
+
   /** The id of a speculation covering the whole utterance that just ended, or null. */
   takeEndedSpeculation(): number | null {
     return this.takeEnded()?.speculationId ?? null;
@@ -213,6 +270,7 @@ export class UtteranceTracker {
     this.cancelSpeculation();
     this.clearSegment();
     this.ended = null;
+    this.setRedemption(this.options.redemptionMs, true);
   }
 
   /**
@@ -222,6 +280,18 @@ export class UtteranceTracker {
   cancelPendingSpeculation(): void {
     this.speculatedThisPause = true;
     this.cancelSpeculation();
+    if (this.speaking) this.setRedemption(this.options.fallbackRedemptionMs ?? this.options.redemptionMs);
+  }
+
+  /**
+   * The transcript of speculation `id` is in: end the current pause after `silenceMs`
+   * of silence in total (immediately if that much has already passed). Ignored when
+   * the speculation is stale (the candidate resumed talking or the utterance ended).
+   */
+  endpoint(id: number, silenceMs: number): boolean {
+    if (!this.speaking || id !== this.speculationId || !this.speculationValid) return false;
+    this.setRedemption(silenceMs);
+    return true;
   }
 
   /**
@@ -233,17 +303,44 @@ export class UtteranceTracker {
     this.confidentFrames = Math.max(this.confidentFrames, this.heardFrames);
     this.maxRun = Math.max(this.maxRun, this.heardMaxRun);
     this.run = Math.max(this.run, this.heardRun);
+    this.peakSnrDb = Math.max(this.peakSnrDb, this.heardPeakSnrDb);
+  }
+
+  private finishSegment(): UtteranceVerdict {
+    const enough = this.frames.filter((f) => f.isSpeech).length >= this.minSpeechFrames;
+    const accepted = this.passes();
+    const speculationId = accepted && enough && this.speculationValid ? this.speculationId : null;
+    if (this.speculationId !== null && this.speculationId !== speculationId) this.cancelSpeculation();
+    const verdict: UtteranceVerdict = {
+      accepted,
+      heard: this.heard(),
+      reason: accepted ? "ok" : this.faintFrames >= (this.options.gate?.minConfidentFrames ?? 0) ? "quiet" : "short",
+      speculationId,
+      samples: this.frames.reduce((n, f) => n + f.frame.length, 0),
+      silenceMs: this.redemption * this.options.frameMs,
+    };
+    this.speculationId = null; // handed over (or cancelled) above
+    this.clearSegment();
+    this.setRedemption(this.options.redemptionMs);
+    return verdict;
+  }
+
+  private isLoud(db: number): boolean {
+    const gate = this.options.gate;
+    return !gate || db >= Math.max(this.floorDb + gate.minSnrDb, toDb(gate.minSpeechRms));
   }
 
   private updateGate(probability: number, db: number): void {
     const gate = this.options.gate;
     if (!gate) return;
     const speech = probability >= gate.confidentThreshold;
-    const loud = db >= Math.max(this.floorDb + gate.minSnrDb, toDb(gate.minSpeechRms));
+    const loud = this.isLoud(db);
+    const snr = db - this.floorDb;
     if (speech && loud) {
       this.heardFrames++;
       this.heardRun++;
       this.heardMaxRun = Math.max(this.heardMaxRun, this.heardRun);
+      this.heardPeakSnrDb = Math.max(this.heardPeakSnrDb, snr);
     } else {
       this.heardRun = 0;
     }
@@ -252,22 +349,27 @@ export class UtteranceTracker {
       this.confidentFrames++;
       this.run++;
       this.maxRun = Math.max(this.maxRun, this.run);
+      this.peakSnrDb = Math.max(this.peakSnrDb, snr);
     } else {
       if (confident) this.faintFrames++;
       this.run = 0;
     }
   }
 
-  private passes(): boolean {
+  /** Enough confident speech, or one crisp close word. */
+  private gatePasses(frames: number, maxRun: number, peakSnrDb: number): boolean {
     const gate = this.options.gate;
     if (!gate) return true;
-    return this.confidentFrames >= gate.minConfidentFrames && this.maxRun >= gate.minConfidentRun;
+    if (frames >= gate.minConfidentFrames && maxRun >= gate.minConfidentRun) return true;
+    return !!gate.shortWord && maxRun >= gate.shortWord.minRun && peakSnrDb >= gate.shortWord.minSnrDb;
+  }
+
+  private passes(): boolean {
+    return this.gatePasses(this.confidentFrames, this.maxRun, this.peakSnrDb);
   }
 
   private heard(): boolean {
-    const gate = this.options.gate;
-    if (!gate) return true;
-    return this.heardFrames >= gate.minConfidentFrames && this.heardMaxRun >= gate.minConfidentRun;
+    return this.gatePasses(this.heardFrames, this.heardMaxRun, this.heardPeakSnrDb);
   }
 
   private withinBudget(): boolean {
@@ -275,6 +377,22 @@ export class UtteranceTracker {
     if (!max) return true;
     this.speculationFrames = this.speculationFrames.filter((at) => this.frameIndex - at < this.minuteFrames);
     return this.speculationFrames.length < max;
+  }
+
+  private setRedemption(ms: number, force = false): void {
+    if (this.inFrame) {
+      this.pendingRedemptionMs = ms;
+      return;
+    }
+    this.pendingRedemptionMs = null;
+    this.applyRedemption(ms, force);
+  }
+
+  private applyRedemption(ms: number, force = false): void {
+    if (ms === this.redemptionMs && !force) return;
+    this.redemptionMs = ms;
+    this.redemptionFrames = Math.floor(ms / this.options.frameMs);
+    this.options.onRedemptionChange?.(ms);
   }
 
   private cancelSpeculation(): void {
@@ -297,5 +415,7 @@ export class UtteranceTracker {
     this.heardFrames = 0;
     this.heardRun = 0;
     this.heardMaxRun = 0;
+    this.peakSnrDb = -Infinity;
+    this.heardPeakSnrDb = -Infinity;
   }
 }

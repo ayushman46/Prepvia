@@ -112,6 +112,26 @@ export async function getReport(id: string, signal?: AbortSignal): Promise<Repor
 
 export type SpeculativeTranscript = { text: string; echo: boolean };
 
+/** A speculative transcript that hasn't arrived by then is abandoned: the audio is uploaded instead. */
+export const SPECULATION_DEADLINE_MS = 6_000;
+
+/** Resolve with the promise's value, or null if it fails or takes longer than `ms`. */
+export function withDeadline<T>(promise: Promise<T>, ms: number): Promise<T | null> {
+  return new Promise((resolve) => {
+    const timer = setTimeout(() => resolve(null), ms);
+    promise.then(
+      (value) => {
+        clearTimeout(timer);
+        resolve(value);
+      },
+      () => {
+        clearTimeout(timer);
+        resolve(null);
+      },
+    );
+  });
+}
+
 /** Transcribe an answer while the candidate is still within the end-of-turn pause. */
 export async function transcribeSpeculative(id: string, audio: Blob, signal?: AbortSignal): Promise<SpeculativeTranscript> {
   return (
@@ -128,10 +148,16 @@ export async function transcribeSpeculative(id: string, audio: Blob, signal?: Ab
  * `audio` with `transcript`: a speculative transcript is in flight; use it if it
  * succeeds, otherwise fall back to sending the audio.
  */
-export type TurnPayload =
+export type TurnPayload = (
   | { audio: Blob; transcript?: Promise<SpeculativeTranscript | null> }
   | { text: string }
-  | { continue: true };
+  | { continue: true }
+) & {
+  /** The candidate kept talking before Aria's reply was heard: add this to their last answer and replace that reply. */
+  amend?: boolean;
+  /** Aria's previous reply was interrupted: what the candidate actually heard of it. */
+  heard?: string;
+};
 
 /** Parse a stream of newline-delimited JSON objects. */
 export async function* readNdjson<T>(stream: ReadableStream<Uint8Array>): AsyncGenerator<T> {
@@ -165,8 +191,15 @@ export async function streamTurn(
   signal?: AbortSignal,
 ): Promise<void> {
   const init: RequestInit = { method: "POST", signal, cache: "no-store" };
+  const extra = { ...(payload.amend ? { amend: true } : {}), ...(payload.heard !== undefined ? { heard: payload.heard } : {}) };
+  // Audio bodies carry the same flags as headers (the heard text URI-encoded, capped).
+  const audioHeaders = (): Record<string, string> => ({
+    "Content-Type": "audio/wav",
+    ...(payload.amend ? { "X-Answer-Continues": "1" } : {}),
+    ...(payload.heard !== undefined ? { "X-Interrupted-Heard": encodeURIComponent(payload.heard.slice(0, 1_500)) } : {}),
+  });
   if ("audio" in payload && payload.transcript) {
-    const speculative = await payload.transcript.catch(() => null);
+    const speculative = await withDeadline(payload.transcript, SPECULATION_DEADLINE_MS);
     if (speculative?.echo) {
       onEvent({ type: "no_speech" });
       return;
@@ -174,17 +207,17 @@ export async function streamTurn(
     if (speculative?.text) {
       // STT already happened during the pause: submit the transcript as text. The
       // server re-applies the speaker-echo filter for voice-derived text.
-      init.body = JSON.stringify({ text: speculative.text, voice: true });
+      init.body = JSON.stringify({ text: speculative.text, voice: true, ...extra });
       init.headers = { "Content-Type": "application/json" };
     } else {
       init.body = payload.audio;
-      init.headers = { "Content-Type": "audio/wav" };
+      init.headers = audioHeaders();
     }
   } else if ("audio" in payload) {
     init.body = payload.audio;
-    init.headers = { "Content-Type": "audio/wav" };
+    init.headers = audioHeaders();
   } else {
-    init.body = JSON.stringify("text" in payload ? { text: payload.text } : {});
+    init.body = JSON.stringify("text" in payload ? { text: payload.text, ...extra } : extra);
     init.headers = { "Content-Type": "application/json" };
   }
 

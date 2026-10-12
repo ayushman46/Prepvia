@@ -428,6 +428,9 @@ async function runPersona(key) {
     turns: transcript.filter((t) => t.role === "ai").length,
     sections: [...new Set(sections.filter(Boolean))],
     canvas: canvasTask?.title ?? null,
+    // Kept so report claims about the hands-on work can be audited against it.
+    canvas_task: canvasTask,
+    canvas_work: canvasWork || null,
     ended,
     report_score: report?.score ?? null,
     server_first_audio_p50_ms: sortedAudio[Math.floor(sortedAudio.length / 2)] ?? null,

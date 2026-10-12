@@ -2,27 +2,49 @@
 
 import { useCallback, useEffect, useRef, useState } from "react";
 import { MicVAD, type RealTimeVADOptions } from "@ricky0123/vad-web";
+import type { EndpointKind } from "@/lib/endpointing";
 import { rms, UtteranceTracker, type GateOptions } from "@/lib/utterance-tracker";
 import { MAX_UTTERANCE_SECONDS } from "@/lib/wav";
 
 const ASSET_PATH = process.env.NEXT_PUBLIC_VAD_ASSET_PATH || "/vad/";
 const SAMPLE_RATE = 16_000;
-/** Silence required before a turn ends. Exported so latency can be measured from the real end of speech. */
-export const REDEMPTION_MS = 800;
+/**
+ * Semantic end of turn: how much silence ends an answer, decided per pause from the
+ * speculative transcript of what was said so far (see classifyEndpoint). A finished
+ * sentence gets a fast reply; "…and", "um" or "let me think" get time to continue.
+ */
+export const END_OF_TURN_MS: Record<EndpointKind, number> = {
+  complete: 800,
+  uncertain: 1_400,
+  incomplete: 2_200,
+  thinking: 5_000,
+  /** No transcript of the pause (speculation throttled or failed). */
+  unknown: 1_200,
+};
+/** Silence that ends an utterance while its pause's transcript is still on its way. */
+const PENDING_END_MS = END_OF_TURN_MS.incomplete;
 const POSITIVE_THRESHOLD = 0.5;
 const NEGATIVE_THRESHOLD = 0.35;
 const PRE_SPEECH_PAD_MS = 300;
 const MIN_SPEECH_MS = 250;
 /** Silero v5 processes 512-sample frames at 16 kHz. */
 const FRAME_MS = 32;
-/** Start speculative STT after this much silence: late enough to skip most mid-sentence pauses (saving STT quota), early enough that the rest of the 800 ms window hides STT latency. */
+/** Start speculative STT after this much silence: late enough to skip most mid-sentence pauses (saving STT quota), early enough that its transcript usually arrives within the 800 ms a finished answer waits. */
 export const SPECULATE_AFTER_MS = 350;
 /**
  * Background-noise gate: an answer needs at least 256 ms of confident speech (with
  * 128 ms unbroken) that is 9 dB above the room's noise floor. Close-talk speech
  * clears this easily; clicks, coughs and distant voices don't.
  */
-const GATE: GateOptions = { confidentThreshold: 0.8, minConfidentFrames: 8, minConfidentRun: 4, minSnrDb: 9, minSpeechRms: 0.006 };
+const GATE: GateOptions = {
+  confidentThreshold: 0.8,
+  minConfidentFrames: 8,
+  minConfidentRun: 4,
+  minSnrDb: 9,
+  minSpeechRms: 0.006,
+  // "No." / "Yep." can be ~200 ms of voicing: accept 160 ms unbroken if clearly close (18 dB over the room).
+  shortWord: { minRun: 5, minSnrDb: 18 },
+};
 const MAX_SPECULATIONS_PER_MINUTE = 8;
 /** Push-to-talk keeps this much audio from just before the button was pressed, and after release. */
 const HOLD_PREROLL_FRAMES = 10; // 320 ms
@@ -37,6 +59,7 @@ const STALL_MS = 2_500;
 const SILENT_FRAMES = 75; // 2.4 s
 
 export type CaptureMode = "auto" | "push";
+export type SpeechActivity = "onset" | "speech" | "ended";
 /** Something is wrong with the microphone signal while listening. */
 export type CaptureIssue = "ended" | "muted" | "silent" | "stalled" | null;
 
@@ -55,8 +78,17 @@ export type VadCallbacks = {
   onFrame?: (speechProbability: number, level: number, rms: number, noiseFloor: number) => void;
   /** An utterance was ignored as background noise ("quiet": speech-like but too faint). */
   onRejected?: (reason: "short" | "quiet") => void;
-  /** A real-sounding utterance ended while the candidate didn't have the floor. */
-  onDropped?: () => void;
+  /**
+   * A real-sounding utterance ended while the candidate didn't have the floor
+   * (e.g. they kept talking after their answer was sent). The audio is passed on so
+   * it can still be added to the answer instead of being lost.
+   */
+  onDropped?: (audio: Float32Array, endedAt: number) => void;
+  /**
+   * Whether or not the candidate has the floor: an utterance began ("onset", possibly
+   * just noise), turned out to be close speech ("speech"), or is over ("ended").
+   */
+  onSpeechActivity?: (state: SpeechActivity) => void;
   /** A push-to-talk hold reached the maximum answer length. */
   onHoldLimit?: () => void;
 };
@@ -107,6 +139,16 @@ export function describeMicError(error: unknown): MicError {
 }
 
 const CONSTRAINTS: MediaTrackConstraints = { channelCount: 1, echoCancellation: true, autoGainControl: true, noiseSuppression: true };
+/** The microphone the candidate picked (remembered across interviews on this browser). */
+const DEVICE_KEY = "interviewai:mic-device";
+
+function readDevice(): string {
+  try {
+    return window.localStorage.getItem(DEVICE_KEY) ?? "";
+  } catch {
+    return "";
+  }
+}
 
 function concat(frames: Float32Array[]): Float32Array {
   const out = new Float32Array(frames.reduce((n, f) => n + f.length, 0));
@@ -164,6 +206,10 @@ export function useVAD(callbacks: VadCallbacks, accepting: boolean, mode: Captur
   const restartRef = useRef<() => Promise<void>>(async () => undefined);
   /** A barge-in handed the floor over; re-credit the utterance once `accepting` catches up. */
   const claimRef = useRef(false);
+  /** pause({ submit: true }) is ending the utterance in progress: deliver it as an answer. */
+  const submittingRef = useRef(false);
+  const [deviceId, setDeviceId] = useState(readDevice);
+  const deviceIdRef = useRef(deviceId);
 
   const [loading, setLoading] = useState(true);
   const [errored, setErrored] = useState<string | false>(false);
@@ -189,7 +235,9 @@ export function useVAD(callbacks: VadCallbacks, accepting: boolean, mode: Captur
       frameMs: FRAME_MS,
       positiveThreshold: POSITIVE_THRESHOLD,
       negativeThreshold: NEGATIVE_THRESHOLD,
-      redemptionMs: REDEMPTION_MS,
+      redemptionMs: PENDING_END_MS,
+      fallbackRedemptionMs: END_OF_TURN_MS.unknown,
+      onRedemptionChange: (ms) => vadRef.current?.setOptions({ redemptionMs: ms }),
       preSpeechPadMs: PRE_SPEECH_PAD_MS,
       minSpeechMs: MIN_SPEECH_MS,
       speculateAfterMs: SPECULATE_AFTER_MS,
@@ -200,6 +248,15 @@ export function useVAD(callbacks: VadCallbacks, accepting: boolean, mode: Captur
       onSpeculate: (audio, id) => callbacksRef.current.onSpeculate?.(audio, id),
       onCancelSpeculation: (id) => callbacksRef.current.onCancelSpeculation?.(id),
     });
+  }, []);
+
+  /** Forget the utterance in progress; anyone waiting for it to end is told it did. */
+  const resetTracker = useCallback(() => {
+    const tracker = trackerRef.current;
+    if (!tracker) return;
+    const wasSpeaking = tracker.inUtterance;
+    tracker.reset();
+    if (wasSpeaking) callbacksRef.current.onSpeechActivity?.("ended");
   }, []);
 
   /** Serialize an operation on the MicVAD after any operation already in flight. */
@@ -242,8 +299,14 @@ export function useVAD(callbacks: VadCallbacks, accepting: boolean, mode: Captur
 
       const tracker = trackerRef.current;
       if (!tracker) return;
+      const wasSpeaking = tracker.inUtterance;
+      const wasHearing = tracker.hearing;
       tracker.frame(probability, frame, level);
-      const speaking = probability > 0.6;
+      if (!wasSpeaking && tracker.inUtterance) callbacksRef.current.onSpeechActivity?.("onset");
+      if (!wasHearing && tracker.hearing) callbacksRef.current.onSpeechActivity?.("speech");
+      if (wasSpeaking && !tracker.inUtterance) callbacksRef.current.onSpeechActivity?.("ended");
+      // Whole utterances (with their pauses), not single frames, so "Listening…" doesn't flicker between words.
+      const speaking = tracker.hearing;
       if (speaking !== speakingRef.current) {
         speakingRef.current = speaking;
         setUserSpeaking(speaking);
@@ -254,9 +317,10 @@ export function useVAD(callbacks: VadCallbacks, accepting: boolean, mode: Captur
   );
 
   const handleSpeechEnd = useCallback((audio: Float32Array) => {
-    // The VAD fires after REDEMPTION_MS of silence; the candidate stopped talking then.
-    const endedAt = performance.now() - REDEMPTION_MS;
-    const verdict = trackerRef.current?.takeEnded() ?? null;
+    const submitting = submittingRef.current;
+    const verdict = (submitting ? trackerRef.current?.endNow() : trackerRef.current?.takeEnded()) ?? null;
+    // The VAD fires after the pause's end-of-turn silence; the candidate stopped talking then.
+    const endedAt = performance.now() - (verdict?.silenceMs ?? END_OF_TURN_MS.unknown);
     claimRef.current = false;
     const discard = () => {
       if (verdict?.speculationId != null) callbacksRef.current.onCancelSpeculation?.(verdict.speculationId);
@@ -264,10 +328,15 @@ export function useVAD(callbacks: VadCallbacks, accepting: boolean, mode: Captur
     if (modeRef.current === "push") return discard(); // push-to-talk: the button decides
     // The tracker mirrors the VAD frame for frame; if they ever disagree, fail open.
     const matched = verdict !== null && verdict.samples === audio.length;
+    if (submitting) {
+      // Capture is stopping mid-answer: keep what was said if it was a real answer.
+      if (matched && verdict.accepted) callbacksRef.current.onUtterance(audio.slice(0, MAX_UTTERANCE_SECONDS * SAMPLE_RATE), performance.now(), null);
+      return discard();
+    }
     if (!acceptingRef.current) {
       discard();
-      // Real-sounding speech while Aria was thinking: tell the candidate it wasn't heard.
-      if (!matched || verdict.heard) callbacksRef.current.onDropped?.();
+      // Real-sounding speech while the candidate didn't have the floor: let the page decide.
+      if (!matched || verdict.heard) callbacksRef.current.onDropped?.(audio, endedAt);
       return;
     }
     if (matched && !verdict.accepted) {
@@ -276,14 +345,33 @@ export function useVAD(callbacks: VadCallbacks, accepting: boolean, mode: Captur
       return;
     }
     const maxSamples = MAX_UTTERANCE_SECONDS * SAMPLE_RATE;
-    const clipped = audio.length > maxSamples;
-    const speculationId = matched && !clipped ? verdict.speculationId : null;
+    if (audio.length > maxSamples) {
+      // Longer than one upload allows: send the first two minutes as the answer and
+      // the rest as its continuation, so nothing the candidate said is lost.
+      discard();
+      callbacksRef.current.onUtterance(audio.slice(0, maxSamples), endedAt, null);
+      for (let offset = maxSamples; offset < audio.length; offset += maxSamples) {
+        callbacksRef.current.onDropped?.(audio.slice(offset, offset + maxSamples), endedAt);
+      }
+      return;
+    }
+    const speculationId = matched ? verdict.speculationId : null;
     if (speculationId === null) discard();
-    callbacksRef.current.onUtterance(clipped ? audio.slice(0, maxSamples) : audio, endedAt, speculationId);
+    callbacksRef.current.onUtterance(audio, endedAt, speculationId);
   }, []);
 
   const acquireStream = useCallback(async (): Promise<MediaStream> => {
-    const stream = await navigator.mediaDevices.getUserMedia({ audio: CONSTRAINTS });
+    const deviceId = deviceIdRef.current;
+    let stream: MediaStream;
+    try {
+      stream = await navigator.mediaDevices.getUserMedia({ audio: deviceId ? { ...CONSTRAINTS, deviceId: { exact: deviceId } } : CONSTRAINTS });
+    } catch (error) {
+      // The chosen microphone is gone (unplugged): fall back to the default one.
+      if (!deviceId || !(error instanceof DOMException) || (error.name !== "OverconstrainedError" && error.name !== "NotFoundError")) throw error;
+      deviceIdRef.current = "";
+      setDeviceId("");
+      stream = await navigator.mediaDevices.getUserMedia({ audio: CONSTRAINTS });
+    }
     // Never leave an earlier capture running (e.g. overlapping restarts).
     const previous = streamRef.current;
     if (previous && previous !== stream) previous.getTracks().forEach((track) => track.stop());
@@ -312,11 +400,11 @@ export function useVAD(callbacks: VadCallbacks, accepting: boolean, mode: Captur
         baseAssetPath: ASSET_PATH,
         onnxWASMBasePath: ASSET_PATH,
         startOnLoad: false,
-        // ~0.8 s of silence ends a turn: responsive, but natural pauses mid-answer
-        // (which rarely exceed this) don't cut the candidate off.
+        // The end-of-turn silence changes per pause (the tracker drives it through
+        // setOptions); every utterance starts from the same value as the tracker.
         positiveSpeechThreshold: POSITIVE_THRESHOLD,
         negativeSpeechThreshold: NEGATIVE_THRESHOLD,
-        redemptionMs: REDEMPTION_MS,
+        redemptionMs: trackerRef.current?.currentRedemptionMs ?? PENDING_END_MS,
         preSpeechPadMs: PRE_SPEECH_PAD_MS,
         minSpeechMs: MIN_SPEECH_MS,
         submitUserSpeechOnPause: false,
@@ -407,30 +495,45 @@ export function useVAD(callbacks: VadCallbacks, accepting: boolean, mode: Captur
           throw describeMicError(error);
         }
         if (disposedRef.current) return;
-        trackerRef.current?.reset();
+        resetTracker();
         lastFrameAtRef.current = performance.now();
         silentFramesRef.current = 0;
         listeningRef.current = true;
         setListening(true);
         setCaptureIssue(null);
       }),
-    [create, enqueue],
+    [create, enqueue, resetTracker],
   );
 
+  /**
+   * Stop listening. With `submit`, an answer in progress (hands-free speech or a
+   * push-to-talk hold) is delivered first instead of being thrown away.
+   */
   const pause = useCallback(
-    () =>
+    (options: { submit?: boolean } = {}) =>
       enqueue(async () => {
         listeningRef.current = false;
         setListening(false);
-        trackerRef.current?.reset();
+        const vad = vadRef.current;
+        if (options.submit && vad && trackerRef.current?.hearing) {
+          submittingRef.current = true;
+          try {
+            vad.setOptions({ submitUserSpeechOnPause: true });
+            await vad.pause().catch(() => undefined);
+          } finally {
+            vad.setOptions({ submitUserSpeechOnPause: false });
+            submittingRef.current = false;
+          }
+        }
+        resetTracker();
         const hold = holdRef.current;
         if (hold) {
           holdRef.current = null;
-          hold.resolve?.(null);
+          hold.resolve?.(options.submit && hold.heldFrames >= HOLD_MIN_FRAMES ? concat(hold.frames) : null);
         }
-        await vadRef.current?.pause().catch(() => undefined);
+        await vad?.pause().catch(() => undefined);
       }),
-    [enqueue],
+    [enqueue, resetTracker],
   );
 
   /** Re-open the microphone (new default device, revoked or dead track). Coalesces overlapping calls. */
@@ -440,7 +543,7 @@ export function useVAD(callbacks: VadCallbacks, accepting: boolean, mode: Captur
       if (!listeningRef.current || !vadRef.current) return;
       try {
         await vadRef.current.pause().catch(() => undefined);
-        trackerRef.current?.reset();
+        resetTracker();
         if (!listeningRef.current) return; // paused (muted, finished) meanwhile
         await vadRef.current.start();
         if (!listeningRef.current) await vadRef.current.pause().catch(() => undefined);
@@ -459,7 +562,7 @@ export function useVAD(callbacks: VadCallbacks, accepting: boolean, mode: Captur
     });
     restartPendingRef.current = run;
     return run;
-  }, [enqueue]);
+  }, [enqueue, resetTracker]);
   useEffect(() => {
     restartRef.current = restart;
   }, [restart]);
@@ -547,5 +650,25 @@ export function useVAD(callbacks: VadCallbacks, accepting: boolean, mode: Captur
     trackerRef.current?.claimFloor();
   }, []);
 
-  return { loading, errored, listening, userSpeaking, captureIssue, start, pause, restart, beginHold, endHold, claimFloor };
+  /** Capture from another microphone ("" = the system default), switching now if listening. */
+  const selectDevice = useCallback(
+    (id: string) => {
+      deviceIdRef.current = id;
+      setDeviceId(id);
+      try {
+        window.localStorage.setItem(DEVICE_KEY, id);
+      } catch {
+        // storage unavailable: the choice lasts for this page only
+      }
+      if (listeningRef.current) void restart();
+    },
+    [restart],
+  );
+
+  /** The transcript of speculation `id` is in: end the current pause as `kind` warrants. */
+  const endpoint = useCallback((id: number, kind: EndpointKind) => {
+    trackerRef.current?.endpoint(id, END_OF_TURN_MS[kind]);
+  }, []);
+
+  return { loading, errored, listening, userSpeaking, captureIssue, deviceId, start, pause, restart, beginHold, endHold, claimFloor, endpoint, selectDevice };
 }

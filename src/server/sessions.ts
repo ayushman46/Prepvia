@@ -48,6 +48,8 @@ export type SessionDoc = Partial<InterviewPlan> & {
   created_at: Date;
   updated_at?: Date;
   started_at?: Date;
+  /** Aria closed the interview (it is completed once the candidate ends it or opens the report). */
+  ended_at?: Date;
   completed_at?: Date;
   expires_at?: Date;
   canvas?: CanvasState;
@@ -146,13 +148,55 @@ export async function requireSession(id: string): Promise<SessionDoc> {
   return session;
 }
 
-export async function getTranscripts(id: string): Promise<TranscriptEntry[]> {
+/** An interviewer reply the candidate interrupted, as they actually heard it. */
+export function heardContent(heard: string): string {
+  const said = heard.trim();
+  return said ? `${said} [interrupted by the candidate; the rest was never spoken]` : "[interrupted by the candidate before anything was spoken]";
+}
+
+/**
+ * The conversation in order. Interrupted interviewer replies read as heard (for the
+ * interviewer, the analysis and the report) unless `asSaved` asks for the full text.
+ */
+export async function getTranscripts(id: string, { asSaved = false } = {}): Promise<TranscriptEntry[]> {
   const docs = await (await transcripts())
-    .find({ session_id: id }, { projection: { role: 1, content: 1 } })
+    .find({ session_id: id }, { projection: { role: 1, content: 1, heard: 1 } })
     .sort({ timestamp: 1, _id: 1 })
     .limit(1000)
     .toArray();
-  return docs.map((doc) => ({ role: doc.role === "user" ? "user" : "ai", content: String(doc.content ?? "") }));
+  return docs.map((doc) => ({
+    role: doc.role === "user" ? "user" : "ai",
+    content: !asSaved && doc.role === "ai" && typeof doc.heard === "string" ? heardContent(doc.heard) : String(doc.content ?? ""),
+  }));
+}
+
+/** Record what the candidate heard of the latest interviewer reply before interrupting it. */
+export async function markLastReplyHeard(id: string, heard: string): Promise<void> {
+  const collection = await transcripts();
+  const last = await collection.find({ session_id: id }).sort({ timestamp: -1, _id: -1 }).limit(1).next();
+  if (last?.role !== "ai") return;
+  await collection.updateOne({ _id: last._id }, { $set: { heard: heard.slice(0, 4_000) } });
+}
+
+/**
+ * The candidate continued their latest answer before hearing the reply to it: append
+ * `extra` to that answer and delete the replies to it (never heard). Returns the
+ * merged answer, or null if there is no answer to continue.
+ */
+export async function amendLastAnswer(id: string, extra: string, maxChars: number): Promise<string | null> {
+  const collection = await transcripts();
+  const answer = await collection.find({ session_id: id, role: "user" }).sort({ timestamp: -1, _id: -1 }).limit(1).next();
+  if (!answer) return null;
+  const merged = `${String(answer.content ?? "").trim()} ${extra.trim()}`.trim().slice(0, maxChars);
+  await Promise.all([
+    collection.updateOne({ _id: answer._id }, { $set: { content: merged } }),
+    collection.deleteMany({
+      session_id: id,
+      role: "ai",
+      $or: [{ timestamp: { $gt: answer.timestamp } }, { timestamp: answer.timestamp, _id: { $gt: answer._id } }],
+    }),
+  ]);
+  return merged;
 }
 
 export async function appendTranscript(id: string, role: "user" | "ai", content: string): Promise<void> {
@@ -202,6 +246,10 @@ export type TurnSessionUpdate = {
   question?: QuestionUpdate | null;
   startedAt?: Date;
   canvasIntroduced?: boolean;
+  /** Aria closed the interview: reopening the link shows the report button, not a live room. */
+  ended?: boolean;
+  /** Replace the asked-questions list (before `question` adds its entry), e.g. after an unheard reply was withdrawn. */
+  questionsAsked?: InterviewState["questions_asked"];
 };
 
 /**
@@ -221,11 +269,15 @@ export async function finishTurn(id: string, lockId: string, update: TurnSession
       "interview_state.current_topic": update.question.current_topic,
       "interview_state.topics_covered": update.question.topics_covered,
     });
-    doc.$push = { "interview_state.questions_asked": { $each: [update.question.question_entry], $slice: -24 } };
+    if (update.questionsAsked) $set["interview_state.questions_asked"] = [...update.questionsAsked, update.question.question_entry].slice(-24);
+    else doc.$push = { "interview_state.questions_asked": { $each: [update.question.question_entry], $slice: -24 } };
+  } else if (update.questionsAsked) {
+    $set["interview_state.questions_asked"] = update.questionsAsked;
   }
   if (update.incrementTurn) doc.$inc = { turn_count: 1 };
   if (update.startedAt) $set.started_at = update.startedAt;
   if (update.canvasIntroduced) $set["canvas.introduced_at"] = new Date();
+  if (update.ended) $set.ended_at = new Date();
   await (await sessions()).updateOne({ ...sessionFilter(id), turn_lock_id: lockId }, doc);
 }
 

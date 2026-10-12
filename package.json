@@ -17,6 +17,7 @@
     "test:e2e": "node tests/e2e/index.mjs",
     "test:live-browser": "node tests/live-browser/run.mjs",
     "test:real-mic": "node tests/live-browser/real-mic.mjs",
+    "test:audio-capture": "node tests/live-browser/audio-capture.mjs",
     "test:quality": "node tests/quality/eval.mjs"
   },
   "dependencies": {

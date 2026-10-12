@@ -57,11 +57,14 @@ export function CanvasPanel({
           <h2 className="truncate font-serif text-xl">{canvas.task.title}</h2>
         </div>
         <div className="flex shrink-0 items-center gap-2">
-          <span className="flex items-center gap-1 text-xs text-vast/60" aria-live="polite">
+          {/* Fixed width so the title doesn't shift while the label changes. */}
+          <span className="flex items-center justify-end gap-1 text-xs text-vast/60 sm:w-44" aria-live="polite">
             {canvas.saving ? (
               <>
                 <Loader2 size={12} className="animate-spin" /> Saving
               </>
+            ) : canvas.unsaved ? (
+              <span className="font-semibold text-red-700">Not saved yet · retrying</span>
             ) : (
               <>
                 <Check size={12} /> Shared with interviewer

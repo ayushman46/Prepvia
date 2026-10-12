@@ -11,7 +11,7 @@ export const dynamic = "force-dynamic";
 export const GET = handler("get interview", async (_request: Request, { params }: { params: Promise<{ id: string }> }) => {
   const { id } = await params;
   const session = await requireSession(id);
-  const transcript = await getTranscripts(id);
+  const transcript = await getTranscripts(id, { asSaved: true });
   const plan = normalizePlan(session);
   const task = session.canvas?.task ?? null;
   const view: SessionView = {
@@ -37,6 +37,7 @@ export const GET = handler("get interview", async (_request: Request, { params }
       language: session.canvas?.language ?? "text",
     },
     transcript,
+    ended: Boolean(session.ended_at),
   };
   return NextResponse.json(view, { headers: { "Cache-Control": "no-store" } });
 });

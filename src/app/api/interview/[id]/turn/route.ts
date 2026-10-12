@@ -17,6 +17,17 @@ export const dynamic = "force-dynamic";
 // after the response via waitUntil and shares this budget.
 export const maxDuration = 120;
 
+/** What the candidate heard of an interrupted reply (header for audio bodies, URI-encoded). */
+function heardHeader(request: Request): string | undefined {
+  const raw = request.headers.get("x-interrupted-heard");
+  if (raw === null) return undefined;
+  try {
+    return decodeURIComponent(raw).slice(0, 4_000);
+  } catch {
+    return undefined;
+  }
+}
+
 async function parseInput(request: Request): Promise<TurnInput> {
   const contentType = (request.headers.get("content-type") || "").toLowerCase();
   if (contentType.startsWith("audio/") || contentType.startsWith("application/octet-stream")) {
@@ -27,12 +38,18 @@ async function parseInput(request: Request): Promise<TurnInput> {
     // Audio turns use speech-to-text too. They are the fallback when speculative
     // transcription was throttled, so they get their own per-IP budget.
     enforceLocalRateLimit("stt-turn", clientIp(request), Math.ceil(config.limits.transcriptionsPerIpPerHour / 60), 60);
-    return { kind: "audio", audio: new Uint8Array(await request.arrayBuffer()) };
+    return {
+      kind: "audio",
+      audio: new Uint8Array(await request.arrayBuffer()),
+      amend: request.headers.get("x-answer-continues") === "1",
+      heard: heardHeader(request),
+    };
   }
   if (contentType.includes("application/json")) {
-    const body = await readJson<{ text?: unknown; voice?: unknown }>(request, 64 * 1024);
+    const body = await readJson<{ text?: unknown; voice?: unknown; amend?: unknown; heard?: unknown }>(request, 64 * 1024);
     const text = typeof body.text === "string" ? body.text.trim() : "";
-    return text ? { kind: "text", text, voice: body.voice === true } : { kind: "continue" };
+    const heard = typeof body.heard === "string" ? body.heard.slice(0, 4_000) : undefined;
+    return text ? { kind: "text", text, voice: body.voice === true, amend: body.amend === true, heard } : { kind: "continue", heard };
   }
   return { kind: "continue" };
 }

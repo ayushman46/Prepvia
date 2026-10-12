@@ -1,11 +1,30 @@
 "use client";
 
 import { useCallback, useEffect, useReducer, useRef } from "react";
-import { ClientApiError, getInterview, saveCanvas, sendEvents, streamTurn, type TurnPayload } from "@/lib/api";
+import {
+  ClientApiError,
+  getInterview,
+  saveCanvas,
+  sendEvents,
+  SPECULATION_DEADLINE_MS,
+  streamTurn,
+  withDeadline,
+  type SpeculativeTranscript,
+  type TurnPayload,
+} from "@/lib/api";
+import { concatWav } from "@/lib/wav";
 import { SequencedAudioPlayer } from "@/lib/audio-player";
 import type { CanvasTaskView, SessionView, TurnEvent, TurnMetrics } from "@/lib/protocol";
 
-export type ChatMessage = { id: string; role: "user" | "ai"; content: string; pending?: boolean; interrupted?: boolean };
+export type ChatMessage = {
+  id: string;
+  role: "user" | "ai";
+  content: string;
+  pending?: boolean;
+  interrupted?: boolean;
+  /** Interviewer sentences that were cut off by an interruption and never spoken. */
+  unspoken?: string;
+};
 
 /**
  * - `processing`: answer sent; waiting for transcription / interviewer text.
@@ -30,7 +49,14 @@ export type TurnLatency = {
   interrupted?: boolean;
 };
 
-export type CanvasState = { task: CanvasTaskView | null; content: string; language: string; saving: boolean };
+export type CanvasState = {
+  task: CanvasTaskView | null;
+  content: string;
+  language: string;
+  saving: boolean;
+  /** The last save failed; it is retried automatically. */
+  unsaved?: boolean;
+};
 
 type State = {
   loadState: "loading" | "loaded" | "not_found" | "error";
@@ -55,6 +81,8 @@ type State = {
   voiceUnavailable: boolean;
   /** Spoken "answers" that turned out to contain no speech (background noise). */
   noSpeechCount: number;
+  /** Aria's reply is held back because the candidate kept talking after their answer was sent. */
+  candidateHold: boolean;
 };
 
 type Action =
@@ -64,7 +92,7 @@ type Action =
   | { type: "speaking"; value: boolean }
   | { type: "interrupted"; value: boolean }
   | { type: "add_message"; message: ChatMessage }
-  | { type: "update_message"; id: string; content?: string; append?: string; pending?: boolean; interrupted?: boolean }
+  | { type: "update_message"; id: string; content?: string; append?: string; appendUnspoken?: string; pending?: boolean; interrupted?: boolean }
   | { type: "remove_message"; id: string }
   | { type: "error"; error: InterviewError | null }
   | { type: "notice"; notice: string | null }
@@ -76,7 +104,8 @@ type Action =
   | { type: "canvas"; patch: Partial<CanvasState> }
   | { type: "latency"; record: TurnLatency }
   | { type: "voice_unavailable" }
-  | { type: "no_speech" };
+  | { type: "no_speech" }
+  | { type: "candidate_hold"; value: boolean };
 
 const initialState: State = {
   loadState: "loading",
@@ -98,6 +127,7 @@ const initialState: State = {
   latency: [],
   voiceUnavailable: false,
   noSpeechCount: 0,
+  candidateHold: false,
 };
 
 let idCounter = 0;
@@ -111,7 +141,8 @@ function reducer(state: State, action: Action): State {
         loadState: "loaded",
         session: action.session,
         questionNumber: action.session.question_number,
-        limitReached: action.session.turn_count >= action.session.max_turns,
+        limitReached: action.session.turn_count >= action.session.max_turns || !!action.session.ended,
+        error: null,
         startedAt: action.session.started_at ? Date.parse(action.session.started_at) : null,
         messages: action.session.transcript.map((m) => ({ id: nextId(), role: m.role, content: m.content })),
         canvas: {
@@ -139,6 +170,7 @@ function reducer(state: State, action: Action): State {
             ? {
                 ...m,
                 content: action.content ?? (action.append ? (m.content ? `${m.content} ${action.append}` : action.append) : m.content),
+                unspoken: action.appendUnspoken ? (m.unspoken ? `${m.unspoken} ${action.appendUnspoken}` : action.appendUnspoken) : m.unspoken,
                 pending: action.pending ?? m.pending,
                 interrupted: action.interrupted ?? m.interrupted,
               }
@@ -167,6 +199,8 @@ function reducer(state: State, action: Action): State {
       return { ...state, voiceUnavailable: true };
     case "no_speech":
       return { ...state, noSpeechCount: state.noSpeechCount + 1 };
+    case "candidate_hold":
+      return { ...state, candidateHold: action.value };
     case "latency": {
       const others = state.latency.filter((r) => r.turn !== action.record.turn);
       return { ...state, latency: [...others, action.record].sort((a, b) => a.turn - b.turn) };
@@ -175,6 +209,29 @@ function reducer(state: State, action: Action): State {
 }
 
 type AiTurn = { messageId: string; texts: Map<number, string>; revealed: Set<number>; interrupted?: boolean };
+
+/** The latest candidate answer and whether Aria's reply to it has been heard yet. */
+type AnswerTurn = {
+  turn: number;
+  aiStarted: boolean;
+  audible: boolean;
+  /** performance.now() when the reply started playing. */
+  audibleAt?: number;
+  /** The candidate cut the reply off right after it started: they were still answering. */
+  falseStart?: boolean;
+  superseded: boolean;
+};
+
+/** Interrupting Aria this soon after her reply starts means the candidate hadn't finished. */
+const FALSE_START_MS = 1_500;
+/** A sound that hasn't turned into close speech by then doesn't hold Aria's reply. */
+const ONSET_HOLD_MS = 400;
+
+type QueuedTurn = { payload: TurnPayload; options: { inputAt?: number }; extraAudio: Blob[] };
+
+/** Failures worth one automatic resend of the same answer (nothing was saved yet). */
+const TRANSIENT_CODES = new Set(["network_error", "timeout", "stt_busy", "stt_failed", "turn_in_progress", "rate_limited", "http_error"]);
+const isTransient = (failure: { code: string; status?: number }) => TRANSIENT_CODES.has(failure.code) || failure.status === 429 || (failure.status ?? 0) >= 502;
 
 export function useInterview(sessionId: string) {
   const [state, dispatch] = useReducer(reducer, initialState);
@@ -188,8 +245,15 @@ export function useInterview(sessionId: string) {
   const prefetchRef = useRef<"idle" | "running" | "done" | "failed">("idle");
   const releasedAtRef = useRef<number | null>(null);
   const canvasRef = useRef({ content: "", language: "text", dirty: false, timer: null as ReturnType<typeof setTimeout> | null });
-  const pendingTurnRef = useRef<{ payload: TurnPayload; options: { inputAt?: number } } | null>(null);
-  const sendTurnRef = useRef<((payload: TurnPayload, options?: { inputAt?: number }) => Promise<boolean>) | null>(null);
+  const pendingTurnRef = useRef<QueuedTurn | null>(null);
+  const answerTurnRef = useRef<AnswerTurn | null>(null);
+  const candidateHoldRef = useRef(false);
+  const onsetTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+  /** An answer whose turn failed before the server saved it: Retry sends it again. */
+  const failedPayloadRef = useRef<{ payload: TurnPayload; options: { inputAt?: number } } | null>(null);
+  /** What the candidate heard of an interrupted reply, sent with their next turn. */
+  const heardRef = useRef<string | undefined>(undefined);
+  const sendTurnRef = useRef<((payload: TurnPayload, options?: { inputAt?: number }, attempt?: number) => Promise<boolean>) | null>(null);
   const stateRef = useRef(state);
   useEffect(() => {
     stateRef.current = state;
@@ -224,17 +288,24 @@ export function useInterview(sessionId: string) {
     dispatch({ type: "caption", value: text });
   }, []);
 
-  /** Show any sentences that were never played (interrupted or playback impossible). */
+  /**
+   * Show any sentences that were never played: as said (playback impossible), or as
+   * unspoken text after an interruption, so the transcript never claims Aria said them.
+   */
   const revealRemaining = useCallback((interrupted: boolean) => {
     const turn = aiTurnRef.current;
     if (!turn) return;
     const rest = [...turn.texts.entries()].filter(([seq]) => !turn.revealed.has(seq)).sort((a, b) => a[0] - b[0]);
     for (const [seq, text] of rest) {
       turn.revealed.add(seq);
-      dispatch({ type: "update_message", id: turn.messageId, append: text, pending: false });
+      dispatch(
+        interrupted
+          ? { type: "update_message", id: turn.messageId, appendUnspoken: text, pending: false }
+          : { type: "update_message", id: turn.messageId, append: text, pending: false },
+      );
     }
     // Cut off mid-sentence counts too, even when every sentence had started playing.
-    if (interrupted) dispatch({ type: "update_message", id: turn.messageId, interrupted: true });
+    if (interrupted) dispatch({ type: "update_message", id: turn.messageId, interrupted: true, pending: false });
   }, []);
 
   const load = useCallback(
@@ -264,6 +335,11 @@ export function useInterview(sessionId: string) {
       onSpeakingChange: (speaking) => dispatch({ type: "speaking", value: speaking }),
       onSentenceStart: (seq, text) => revealSentence(seq, text),
       onTurnAudioStart: (playerTurn, at) => {
+        const answer = answerTurnRef.current;
+        if (answer && latency.get(answer.turn)?.playerTurn === playerTurn) {
+          answer.audible = true;
+          answer.audibleAt = at;
+        }
         for (const [turn, record] of latency) {
           if (record.playerTurn !== playerTurn || record.response_latency_ms !== undefined) continue;
           // A prefetched opening starts when the candidate presses Start.
@@ -303,12 +379,18 @@ export function useInterview(sessionId: string) {
     dispatch({ type: "canvas", patch: { saving: true } });
     try {
       await saveCanvas(sessionId, canvas.content, canvas.language);
+      dispatch({ type: "canvas", patch: { saving: false, unsaved: false } });
     } catch {
-      canvas.dirty = true; // retry on the next flush
-    } finally {
-      dispatch({ type: "canvas", patch: { saving: false } });
+      // Keep the work and try again shortly (the label says it isn't shared yet).
+      canvas.dirty = true;
+      dispatch({ type: "canvas", patch: { saving: false, unsaved: true } });
+      canvas.timer ??= setTimeout(() => void flushCanvasRef.current(), 3_000);
     }
   }, [sessionId]);
+  const flushCanvasRef = useRef(flushCanvas);
+  useEffect(() => {
+    flushCanvasRef.current = flushCanvas;
+  }, [flushCanvas]);
 
   const updateCanvas = useCallback(
     (content: string, language?: string) => {
@@ -325,31 +407,67 @@ export function useInterview(sessionId: string) {
 
   // ------------------------------------------------------------- turns
 
+  /** Send the queued answer (merging any audio queued after it) once the current turn is done. */
+  const flushQueue = useCallback(() => {
+    const queued = pendingTurnRef.current;
+    pendingTurnRef.current = null;
+    if (!queued) return;
+    setTimeout(async () => {
+      let payload = queued.payload;
+      if (queued.extraAudio.length && "audio" in payload) {
+        payload = { audio: await concatWav([payload.audio, ...queued.extraAudio]), amend: payload.amend };
+      }
+      void sendTurnRef.current?.(payload, queued.options);
+    }, 0);
+  }, []);
+
+  /** Queue an answer behind the turn in flight; audio queued together is sent as one answer. */
+  const queueTurn = useCallback((payload: TurnPayload, options: { inputAt?: number }) => {
+    if ("continue" in payload) return;
+    const queued = pendingTurnRef.current;
+    if (queued && "audio" in queued.payload && "audio" in payload) {
+      queued.extraAudio.push(payload.audio);
+      return;
+    }
+    pendingTurnRef.current = { payload, options, extraAudio: [] };
+  }, []);
+
   const sendTurn = useCallback(
-    async (payload: TurnPayload, options: { inputAt?: number } = {}): Promise<boolean> => {
-      if ("audio" in payload && stateRef.current.voiceUnavailable) return false;
+    async (payload: TurnPayload, options: { inputAt?: number } = {}, attempt = 0): Promise<boolean> => {
+      if ("audio" in payload && stateRef.current.voiceUnavailable) {
+        if (!busyRef.current) dispatch({ type: "processing", value: false });
+        return false;
+      }
       if (busyRef.current) {
         // A turn is still finishing (e.g. the candidate barged in while the reply
         // was streaming): queue this answer and send it as soon as the lock frees.
-        if (!("continue" in payload)) pendingTurnRef.current = { payload, options };
+        queueTurn(payload, options);
         return false;
       }
       busyRef.current = true;
+      if (!("continue" in payload) && heardRef.current !== undefined && payload.heard === undefined) {
+        payload = { ...payload, heard: heardRef.current };
+      }
+      const turn = ++turnCounter.current;
+      const input: TurnLatency["input"] = "audio" in payload ? "audio" : "text" in payload ? "text" : "continue";
+      // This becomes the answer a continuation would amend (restored if it never reaches the server).
+      const previousAnswer = answerTurnRef.current;
+      const answerTurn: AnswerTurn | null = input !== "continue" ? { turn, aiStarted: false, audible: false, superseded: false } : null;
+      if (answerTurn) answerTurnRef.current = answerTurn;
+      const superseded = () => !!answerTurn?.superseded;
       if ("audio" in payload && payload.transcript) {
         // Hold the floor while the speculative transcript settles (it usually already
         // has, during the end-of-turn pause). Empty means Whisper heard no speech:
         // don't start a turn (no bubble, no second transcription of the same noise).
         dispatch({ type: "processing", value: true });
-        const speculative = await payload.transcript.catch(() => null);
+        const speculative = await withDeadline(payload.transcript, SPECULATION_DEADLINE_MS);
         if (speculative && (speculative.echo || !speculative.text.trim())) {
           dispatch({ type: "processing", value: false });
           busyRef.current = false;
+          if (answerTurnRef.current === answerTurn) answerTurnRef.current = previousAnswer;
           dispatch({ type: "no_speech" });
-          const seconds = (payload.audio.size - 44) / 32_000;
-          if (seconds >= 2 && !speculative.echo) flashNotice("Didn't catch that. Please try again.");
-          const queued = pendingTurnRef.current;
-          pendingTurnRef.current = null;
-          if (queued) setTimeout(() => void sendTurnRef.current?.(queued.payload, queued.options), 0);
+          if (!speculative.echo) flashNotice("Sorry, I didn't catch that. Could you say it again?");
+          flushQueue();
           return true;
         }
       }
@@ -361,64 +479,83 @@ export function useInterview(sessionId: string) {
       const player = playerRef.current;
       const controller = new AbortController();
       abortRef.current = controller;
-      const turn = ++turnCounter.current;
-      const input: TurnLatency["input"] = "audio" in payload ? "audio" : "text" in payload ? "text" : "continue";
       const record: TurnLatency & { t0: number; inputAt: number; playerTurn?: number } = { turn, input, t0: performance.now(), inputAt };
       latencyRef.current.set(turn, record);
 
-      // Optimistic placeholder so the candidate sees their answer was received.
+      // Optimistic placeholder so the candidate sees their answer was received. A
+      // continuation updates the answer it continues instead of adding a bubble.
       let userMessageId: string | null = null;
-      if ("audio" in payload) {
+      let amended: { id: string; content: string } | null = null;
+      if (payload.amend) {
+        const last = [...stateRef.current.messages].reverse().find((m) => m.role === "user");
+        if (last) {
+          amended = { id: last.id, content: last.content };
+          userMessageId = last.id;
+          dispatch({ type: "update_message", id: last.id, pending: true });
+        }
+      }
+      if (!amended && "audio" in payload) {
         userMessageId = nextId();
         dispatch({ type: "add_message", message: { id: userMessageId, role: "user", content: "", pending: true } });
-      } else if ("text" in payload) {
+      } else if (!amended && "text" in payload) {
         userMessageId = nextId();
-        dispatch({ type: "add_message", message: { id: userMessageId, role: "user", content: payload.text } });
+        dispatch({ type: "add_message", message: { id: userMessageId, role: "user", content: payload.text, pending: true } });
       }
 
       let lastSeq = 0;
       let finished = false;
-      let userConfirmed = "text" in payload;
+      let userConfirmed = false;
       let aiMessageId: string | null = null;
       let failed = false;
+      let failure: { code: string; message: string; retryable: boolean; status?: number; retryAfterMs?: number } | null = null;
 
       const onEvent = (event: TurnEvent) => {
         switch (event.type) {
           case "user_transcript":
             userConfirmed = true;
+            heardRef.current = undefined; // delivered with this turn
+            failedPayloadRef.current = null;
             if (userMessageId) dispatch({ type: "update_message", id: userMessageId, content: event.content, pending: false });
             break;
           case "no_speech":
-            if (userMessageId) dispatch({ type: "remove_message", id: userMessageId });
+            if (amended) dispatch({ type: "update_message", id: amended.id, content: amended.content, pending: false });
+            else if (userMessageId) dispatch({ type: "remove_message", id: userMessageId });
             userMessageId = null;
             dispatch({ type: "no_speech" });
-            flashNotice("Didn't catch that. Please try again.");
+            flashNotice("Sorry, I didn't catch that. Could you say it again?");
             break;
           case "ai_start": {
             record.playerTurn = player?.startTurn();
+            if (answerTurn) answerTurn.aiStarted = true;
+            if (superseded()) {
+              player?.interrupt(); // the candidate is still answering: this reply is never played
+              break;
+            }
             aiMessageId = nextId();
             aiTurnRef.current = { messageId: aiMessageId, texts: new Map(), revealed: new Set() };
             dispatch({ type: "add_message", message: { id: aiMessageId, role: "ai", content: "", pending: true } });
             break;
           }
           case "ai_sentence":
+            if (superseded()) break;
             lastSeq = event.seq;
             record.request_to_first_sentence_ms ??= Math.round(performance.now() - record.t0);
             aiTurnRef.current?.texts.set(event.seq, event.content);
             if (aiTurnRef.current?.interrupted) {
               // Interrupted turn: keep the transcript complete (it matches what the server saved).
               aiTurnRef.current.revealed.add(event.seq);
-              dispatch({ type: "update_message", id: aiTurnRef.current.messageId, append: event.content, pending: false });
+              dispatch({ type: "update_message", id: aiTurnRef.current.messageId, appendUnspoken: event.content, pending: false });
             } else {
               player?.addSentence(event.seq, event.content);
             }
             break;
           case "audio":
+            if (superseded()) break;
             record.request_to_first_audio_event_ms ??= Math.round(performance.now() - record.t0);
             player?.addAudio(event.seq, event.data);
             break;
           case "audio_error":
-            player?.markAudioFailed(event.seq);
+            if (!superseded()) player?.markAudioFailed(event.seq);
             break;
           case "canvas_task":
             dispatch({ type: "canvas", patch: { task: event.task, language: event.task.language } });
@@ -430,6 +567,7 @@ export function useInterview(sessionId: string) {
             break;
           case "ai_done":
             finished = true;
+            if (superseded()) break;
             player?.finishTurn(lastSeq);
             dispatch({ type: "question_number", value: event.question_number });
             break;
@@ -440,20 +578,10 @@ export function useInterview(sessionId: string) {
           case "error":
             failed = true;
             if (event.code === "stt_unavailable") dispatch({ type: "voice_unavailable" });
-            dispatch({
-              type: "error",
-              error: {
-                message: event.message,
-                // Speech-to-text errors mean "say it again": nothing was saved, so a
-                // Retry button would have nothing to resend.
-                retryable: event.code.startsWith("stt_") ? false : event.retryable,
-                // LLM failures happen after the answer is saved, so retrying continues the turn.
-                retryContinues: !event.code.startsWith("stt_"),
-              },
-            });
+            failure = { code: event.code, message: event.message, retryable: event.retryable };
             break;
           case "done":
-            if (event.limit_reached) dispatch({ type: "limit_reached" });
+            if (event.limit_reached && !superseded()) dispatch({ type: "limit_reached" });
             break;
         }
       };
@@ -461,38 +589,65 @@ export function useInterview(sessionId: string) {
       try {
         await flushCanvas(); // the interviewer should see the latest canvas work
         if ("audio" in payload && payload.transcript) {
-          record.speculative_stt = !!(await payload.transcript.catch(() => null))?.text;
+          record.speculative_stt = !!(await withDeadline(payload.transcript, SPECULATION_DEADLINE_MS))?.text;
         }
         await streamTurn(sessionId, payload, onEvent, controller.signal);
       } catch (error) {
         failed = true;
         const apiError = error instanceof ClientApiError ? error : new ClientApiError(0, "unknown", "Something went wrong.");
-        if (apiError.code !== "aborted" && apiError.code !== "turn_in_progress") {
+        if (apiError.code !== "aborted") {
           if (apiError.code === "turn_limit" || apiError.code === "interview_completed") dispatch({ type: "limit_reached" });
-          dispatch({
-            type: "error",
-            error: {
-              message: apiError.message,
-              retryable: !["turn_limit", "interview_completed", "session_not_found"].includes(apiError.code),
-              retryContinues: userConfirmed,
-            },
-          });
+          failure = {
+            code: apiError.code,
+            message: apiError.message,
+            retryable: !["turn_limit", "interview_completed", "session_not_found"].includes(apiError.code),
+            status: apiError.status,
+            retryAfterMs: apiError.retryAfterMs,
+          };
         }
       } finally {
-        if (userMessageId && !userConfirmed) dispatch({ type: "remove_message", id: userMessageId });
+        const unsaved = !userConfirmed && !("continue" in payload);
+        if (unsaved && answerTurnRef.current === answerTurn) answerTurnRef.current = previousAnswer;
+        if (userMessageId && !userConfirmed) {
+          if (amended) dispatch({ type: "update_message", id: amended.id, content: amended.content, pending: false });
+          else dispatch({ type: "remove_message", id: userMessageId });
+        }
         if (aiMessageId && lastSeq === 0) dispatch({ type: "remove_message", id: aiMessageId });
-        if (!finished && lastSeq > 0) player?.finishTurn(lastSeq);
-        dispatch({ type: "processing", value: false });
+        if (!finished && lastSeq > 0 && !superseded()) player?.finishTurn(lastSeq);
         busyRef.current = false;
         if (abortRef.current === controller) abortRef.current = null;
         publishLatency(turn);
-        const queued = pendingTurnRef.current;
-        pendingTurnRef.current = null;
-        if (queued) setTimeout(() => void sendTurnRef.current?.(queued.payload, queued.options), 0);
+        const resend = failure && unsaved && failure.code !== "stt_unavailable" && failure.retryable !== false;
+        if (failure && resend && attempt === 0 && isTransient(failure) && (failure.retryAfterMs ?? 0) <= 8_000) {
+          // Transient failure before the answer was saved: send the same answer again
+          // once, without making the candidate repeat it.
+          const wait = Math.max(failure.code === "turn_in_progress" ? 800 : 400, failure.retryAfterMs ?? 0);
+          setTimeout(() => void sendTurnRef.current?.(payload, options, attempt + 1), wait);
+        } else {
+          // A queued answer goes out next: stay "thinking" instead of flashing "your turn".
+          if (!pendingTurnRef.current) dispatch({ type: "processing", value: false });
+          if (failure && failure.code !== "aborted") {
+            if (resend)
+              failedPayloadRef.current = {
+                payload: "audio" in payload ? { audio: payload.audio, amend: payload.amend, heard: payload.heard } : payload,
+                options,
+              };
+            dispatch({
+              type: "error",
+              error: {
+                message: resend ? `${failure.message} Your answer was kept — press Retry to send it again.` : failure.message,
+                retryable: resend ? true : failure.code.startsWith("stt_") ? false : failure.retryable,
+                // LLM failures happen after the answer is saved, so retrying continues the turn.
+                retryContinues: userConfirmed || ("continue" in payload && failure.code !== "stt_unavailable"),
+              },
+            });
+          }
+          flushQueue();
+        }
       }
       return !failed;
     },
-    [sessionId, flashNotice, flushCanvas, publishLatency],
+    [sessionId, flashNotice, flushCanvas, publishLatency, flushQueue, queueTurn],
   );
 
   useEffect(() => {
@@ -532,8 +687,20 @@ export function useInterview(sessionId: string) {
     const player = playerRef.current;
     if (!player || !stateRef.current.speaking) return false;
     player.interrupt();
+    const ai = aiTurnRef.current;
+    if (ai) {
+      // Tell the server what was actually heard, so the conversation and the report
+      // don't treat the unspoken rest of the reply as asked.
+      heardRef.current = [...ai.texts.entries()]
+        .filter(([seq]) => ai.revealed.has(seq))
+        .sort((a, b) => a[0] - b[0])
+        .map(([, text]) => text)
+        .join(" ");
+    }
     revealRemaining(true);
     if (aiTurnRef.current) aiTurnRef.current.interrupted = true;
+    const answer = answerTurnRef.current;
+    if (answer?.audibleAt !== undefined && performance.now() - answer.audibleAt < FALSE_START_MS) answer.falseStart = true;
     dispatch({ type: "speaking", value: false });
     dispatch({ type: "interrupted", value: true });
     for (const record of latencyRef.current.values()) {
@@ -544,6 +711,101 @@ export function useInterview(sessionId: string) {
     }
     return true;
   }, [revealRemaining, publishLatency]);
+
+  /**
+   * The candidate is talking while their last answer is being answered: don't let Aria
+   * start speaking over them. A sound only delays her briefly until it turns out to be
+   * speech; then the reply waits until they stop. If what they said continues their
+   * answer, `amend` replaces the held reply.
+   */
+  const holdForCandidate = useCallback((activity: "onset" | "speech" | "ended") => {
+    const player = playerRef.current;
+    if (!player || !stateRef.current.started) return;
+    const release = () => {
+      if (!candidateHoldRef.current) return;
+      candidateHoldRef.current = false;
+      if (onsetTimerRef.current) clearTimeout(onsetTimerRef.current);
+      onsetTimerRef.current = null;
+      player.release();
+      dispatch({ type: "candidate_hold", value: false });
+    };
+    if (activity === "ended") {
+      // A continuation that just ended is handed to `amend` in this same task: release after it.
+      if (candidateHoldRef.current) setTimeout(release, 0);
+      return;
+    }
+    const answer = answerTurnRef.current;
+    if (!answer || answer.audible || answer.superseded || stateRef.current.limitReached) return;
+    if (!busyRef.current && !answer.aiStarted) return; // nothing in flight to hold
+    if (!candidateHoldRef.current) {
+      candidateHoldRef.current = true;
+      player.hold();
+    }
+    if (activity === "onset") {
+      if (onsetTimerRef.current) clearTimeout(onsetTimerRef.current);
+      onsetTimerRef.current = setTimeout(() => {
+        onsetTimerRef.current = null;
+        if (!stateRef.current.candidateHold) release(); // never became speech: let Aria talk
+      }, ONSET_HOLD_MS);
+    } else {
+      if (onsetTimerRef.current) clearTimeout(onsetTimerRef.current);
+      onsetTimerRef.current = null;
+      dispatch({ type: "candidate_hold", value: true });
+    }
+  }, []);
+
+  /**
+   * The candidate kept talking after their answer was sent, before Aria's reply was
+   * heard (or right after it started, a false start): add what they said to that
+   * answer, and drop the reply (it answered only part of it; the server deletes it and
+   * answers the whole answer instead). Returns false when it's a new answer instead.
+   */
+  const amend = useCallback(
+    (audio: Blob, endedAt: number, transcript?: Promise<SpeculativeTranscript | null>): boolean => {
+      const answer = answerTurnRef.current;
+      if (!answer || (answer.audible && !answer.falseStart) || stateRef.current.limitReached || !stateRef.current.started) return false;
+      if (!answer.superseded) {
+        answer.superseded = true;
+        playerRef.current?.interrupt();
+        const ai = aiTurnRef.current;
+        if (ai && answer.aiStarted) {
+          dispatch({ type: "remove_message", id: ai.messageId });
+          aiTurnRef.current = null;
+        }
+        heardRef.current = undefined; // that reply is withdrawn, not interrupted
+        dispatch({ type: "interrupted", value: false });
+      }
+      if (candidateHoldRef.current) {
+        candidateHoldRef.current = false;
+        playerRef.current?.release();
+        dispatch({ type: "candidate_hold", value: false });
+      }
+      void sendTurn({ audio, transcript, amend: true }, { inputAt: endedAt });
+      return true;
+    },
+    [sendTurn],
+  );
+
+  /** Retry after an error: resend the kept answer, or continue the turn whose answer was saved. */
+  const retry = useCallback(() => {
+    const failedPayload = failedPayloadRef.current;
+    const error = stateRef.current.error;
+    dispatch({ type: "error", error: null });
+    if (error?.retryContinues) return void sendTurn({ continue: true });
+    if (failedPayload) {
+      failedPayloadRef.current = null;
+      return void sendTurn(failedPayload.payload, failedPayload.options);
+    }
+    void load();
+  }, [sendTurn, load]);
+
+  /** Wait until no answer is being sent or queued (e.g. before ending the interview). */
+  const settle = useCallback(async (timeoutMs = 20_000) => {
+    const deadline = performance.now() + timeoutMs;
+    while ((busyRef.current || pendingTurnRef.current) && performance.now() < deadline) {
+      await new Promise((resolve) => setTimeout(resolve, 100));
+    }
+  }, []);
 
   const stopAudio = useCallback(() => {
     playerRef.current?.stop();
@@ -567,6 +829,10 @@ export function useInterview(sessionId: string) {
     markVoiceUnavailable,
     begin,
     interrupt,
+    holdForCandidate,
+    amend,
+    retry,
+    settle,
     stopAudio,
     updateCanvas,
     flushCanvas,

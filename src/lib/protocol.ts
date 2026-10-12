@@ -72,6 +72,8 @@ export type SessionView = {
   canvas_enabled: boolean;
   canvas: { task: CanvasTaskView | null; content: string; language: string };
   transcript: TranscriptMessage[];
+  /** Aria closed the interview (the candidate only has to open the report). */
+  ended?: boolean;
 };
 
 /** Rubric rating on a 1-5 scale with the reason ("why") behind it. */

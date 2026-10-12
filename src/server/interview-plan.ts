@@ -124,8 +124,9 @@ const REPEAT_REQUEST =
 
 /**
  * Explicit requests to end the interview ("End interview.", "Let's end the
- * interview", "I'm done"). Softer questions like "can we stop here?" are left to
- * the interviewer, who offers to continue.
+ * interview", "I'm done for today"). Softer questions like "can we stop here?" are
+ * left to the interviewer, who offers to continue. A bare "I'm done." usually means
+ * the answer is finished, not the interview, so it doesn't count.
  */
 const STOP_VERB = "(end|ending|stop|stopping|finish|finishing|conclude|concluding|quit|quitting|leave|leaving|exit|exiting|wrap up|wrapping up)";
 const END_REQUEST = [
@@ -134,7 +135,7 @@ const END_REQUEST = [
   new RegExp(`\\b${STOP_VERB}\\s+(this|our)\\s+session\\b`, "i"),
   /^(please\s+)?(end|stop|finish)\s+(the\s+)?session[.!]?$/i,
   /^(let'?s|lets)\s+(end|finish|stop)(\s+(it|here|now|there))?[.!]?$/i,
-  /^(i'?m|i am)\s+(done|finished)(\s+(now|here|for today))?[.!]?$/i,
+  /^(i'?m|i am)\s+(done|finished)\s+(for today|with (the|this) interview)[.!]?$/i,
 ];
 
 export function isEndRequest(message: string): boolean {

@@ -1,5 +1,8 @@
 import { describe, expect, it, vi } from "vitest";
 import { UtteranceTracker } from "@/lib/utterance-tracker";
+// vad-web's own frame processor (the state machine MicVAD runs), to prove the
+// tracker stays in step with it when the end-of-turn silence changes.
+import { FrameProcessor } from "@ricky0123/vad-web/dist/frame-processor.js";
 
 const FRAME_MS = 32;
 const frame = (value: number) => new Float32Array(512).fill(value);
@@ -224,3 +227,99 @@ describe("UtteranceTracker noise gate", () => {
     expect(tracker.takeEnded()).toBeNull();
   });
 });
+
+describe("UtteranceTracker adaptive end of turn", () => {
+  const options = { redemptionMs: 2_200, fallbackRedemptionMs: 1_200, speculateAfterMs: 350 };
+
+  it("waits the pending silence until the pause's transcript decides, then ends a finished answer at 800 ms", () => {
+    const onRedemptionChange = vi.fn();
+    const { tracker, onSpeculate } = makeTracker({ ...options, onRedemptionChange });
+    feed(tracker, "speech", 30);
+    feed(tracker, "silence", 11); // speculation at 352 ms
+    expect(onSpeculate).toHaveBeenCalledTimes(1);
+    feed(tracker, "silence", 20); // 992 ms: past 800 but the transcript isn't in yet
+    expect(tracker.takeEnded()).toBeNull();
+    expect(tracker.endpoint(onSpeculate.mock.calls[0][1], 800)).toBe(true);
+    expect(onRedemptionChange).toHaveBeenLastCalledWith(800);
+    feed(tracker, "silence", 1); // already past 800 ms: ends on the next frame
+    expect(tracker.takeEnded()).toMatchObject({ speculationId: onSpeculate.mock.calls[0][1], silenceMs: 32 * 32 });
+    feed(tracker, "silence", 1);
+    expect(onRedemptionChange).toHaveBeenLastCalledWith(2_200); // the next utterance starts from the pending value
+  });
+
+  it("keeps listening through a thinking pause after an unfinished sentence, as one utterance", () => {
+    const { tracker, onSpeculate } = makeTracker(options);
+    feed(tracker, "speech", 40);
+    feed(tracker, "silence", 11);
+    tracker.endpoint(onSpeculate.mock.calls[0][1], 2_200); // "…and"
+    feed(tracker, "silence", 50); // 1.95 s of thinking
+    expect(tracker.takeEnded()).toBeNull();
+    feed(tracker, "speech", 40); // the candidate continues
+    feed(tracker, "silence", 11);
+    tracker.endpoint(onSpeculate.mock.calls[1][1], 800);
+    feed(tracker, "silence", 14);
+    expect(tracker.takeEnded()).toMatchObject({ speculationId: onSpeculate.mock.calls[1][1], samples: (40 + 61 + 40 + 25) * 512 });
+  });
+
+  it("ignores a decision for a stale speculation (the candidate already resumed)", () => {
+    const { tracker, onSpeculate } = makeTracker(options);
+    feed(tracker, "speech", 30);
+    feed(tracker, "silence", 11);
+    feed(tracker, "speech", 10); // resumed before the transcript came back
+    expect(tracker.endpoint(onSpeculate.mock.calls[0][1], 800)).toBe(false);
+    feed(tracker, "silence", 30);
+    expect(tracker.takeEnded()).toBeNull(); // still waiting for this pause's own decision
+  });
+
+  it("falls back to a fixed silence when a pause gets no speculation", () => {
+    const { tracker, onSpeculate } = makeTracker({ ...options, shouldSpeculate: () => false });
+    feed(tracker, "speech", 30);
+    feed(tracker, "silence", 36); // 1,152 ms
+    expect(tracker.takeEnded()).toBeNull();
+    feed(tracker, "silence", 1); // 37 frames = floor(1,200 / 32), the VAD's own rounding
+    expect(tracker.takeEnded()).toMatchObject({ silenceMs: 37 * 32 });
+    expect(onSpeculate).not.toHaveBeenCalled();
+  });
+
+  it("stays frame-for-frame in step with vad-web's FrameProcessor while the silence changes", async () => {
+    let seed = 42;
+    const random = () => ((seed = (seed * 1664525 + 1013904223) >>> 0) / 2 ** 32);
+    let probability = 0.05;
+    const vadOptions = { positiveSpeechThreshold: 0.5, negativeSpeechThreshold: 0.35, redemptionMs: 2_200, preSpeechPadMs: 300, minSpeechMs: 250, submitUserSpeechOnPause: false };
+    const vad = new FrameProcessor(async () => ({ isSpeech: probability, notSpeech: 1 - probability }), () => undefined, vadOptions, FRAME_MS);
+    vad.resume();
+    const speculations: number[] = [];
+    const tracker = new UtteranceTracker({
+      frameMs: FRAME_MS,
+      positiveThreshold: 0.5,
+      negativeThreshold: 0.35,
+      redemptionMs: 2_200,
+      fallbackRedemptionMs: 1_200,
+      preSpeechPadMs: 300,
+      minSpeechMs: 250,
+      speculateAfterMs: 350,
+      maxSpeculationsPerMinute: 6,
+      onSpeculate: (_audio, id) => speculations.push(id),
+      onRedemptionChange: (ms) => vad.setOptions({ redemptionMs: ms }),
+    });
+    let ends = 0;
+    for (let i = 0; i < 20_000; i++) {
+      // Bursts of speech, pauses of every length, in-between probabilities.
+      if (random() < 0.04) probability = [0.95, 0.9, 0.6, 0.45, 0.2, 0.05, 0.02][Math.floor(random() * 7)];
+      // Speculative transcripts come back at random moments with random verdicts.
+      if (speculations.length && random() < 0.08) tracker.endpoint(speculations[speculations.length - 1], [800, 1_200, 2_200, 5_000][Math.floor(random() * 4)]);
+      let vadEnded: number | null = null;
+      await vad.process(new Float32Array(512).fill(0.05), (event: { msg: string; probs?: { isSpeech: number }; frame?: Float32Array; audio?: Float32Array }) => {
+        if (event.msg === "FRAME_PROCESSED") tracker.frame(event.probs!.isSpeech, event.frame!);
+        if (event.msg === "SPEECH_END") vadEnded = event.audio!.length;
+        if (event.msg === "VAD_MISFIRE") vadEnded = -1;
+      });
+      const verdict = tracker.takeEnded();
+      expect(verdict !== null, `frame ${i}: VAD ended ${vadEnded !== null}, tracker ended ${verdict !== null}`).toBe(vadEnded !== null);
+      if (verdict && vadEnded !== -1) expect(verdict.samples).toBe(vadEnded);
+      if (verdict) ends++;
+    }
+    expect(ends).toBeGreaterThan(50);
+  });
+});
+

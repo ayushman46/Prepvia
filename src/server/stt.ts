@@ -18,6 +18,8 @@ const RETRY_WINDOW_MS = 3_000;
 const INVALID_KEY_HOLD_MS = 60_000;
 /** Speculative calls stop before this many Groq requests per minute (free tier: 20 RPM per key). */
 const SPECULATIVE_RPM_BUDGET = 16;
+/** A real answer waits out a rate limit this short instead of failing. */
+const REAL_TURN_RATE_LIMIT_WAIT_MS = 4_000;
 
 // Whisper commonly hallucinates these on silence or background noise. Stored
 // normalized (lowercase, letters/digits/apostrophes and single spaces only).
@@ -84,6 +86,34 @@ export function validateWav(bytes: Uint8Array): number {
 
 type VerboseSegment = { text?: string; no_speech_prob?: number; avg_logprob?: number };
 
+// Technical terms Whisper often mishears ("item potency" for idempotency, "cash" for
+// cache). Included in the prompt when the resume, job description or role mentions them.
+const TECH_TERMS = new Set(
+  "api apis sql nosql postgres postgresql mysql sqlite redis kafka rabbitmq kubernetes k8s docker terraform aws gcp azure microservices microservice idempotency idempotent latency throughput sharding replication cache caching memcached grpc graphql rest oauth jwt typescript javascript nodejs golang rust java kotlin swift python django flask fastapi spring react angular vue nextjs mongodb dynamodb cassandra elasticsearch kibana grafana prometheus datadog observability ci/cd jenkins github gitlab s3 ec2 lambda serverless webhook webhooks websocket websockets async concurrency mutex deadlock queue queues pubsub etl airflow spark hadoop snowflake bigquery dbt tableau figma jira scrum agile okr okrs kpi kpis a/b".split(
+    " ",
+  ),
+);
+// Always worth priming: common in software interviews and easy to mishear.
+const BASE_TERMS = ["API", "SQL", "Postgres", "Redis", "Kafka", "Kubernetes", "idempotency", "latency", "cache", "microservices"];
+
+/**
+ * A short Whisper prompt with the vocabulary this interview is likely to use, taken
+ * from the role, job description and resume (product names, acronyms, mixed-case
+ * terms), so technical words are transcribed correctly.
+ */
+export function vocabularyPrompt(source: { target_role?: string | null; job_description?: string | null; resume_text?: string | null }): string {
+  const text = [source.target_role, source.job_description, source.resume_text].filter(Boolean).join(" ").slice(0, 20_000);
+  const terms = new Map<string, string>();
+  for (const term of BASE_TERMS) terms.set(term.toLowerCase(), term);
+  for (const [word] of text.matchAll(/[A-Za-z][A-Za-z0-9+#./-]*[A-Za-z0-9+#]/g)) {
+    const key = word.toLowerCase().replace(/\.js$/, "js");
+    const technical = TECH_TERMS.has(key) || /[a-z][A-Z]|[A-Z]{2,}|\d|[+#]|\.[a-z]/.test(word);
+    if (technical && word.length <= 24 && !terms.has(key) && terms.size < 48) terms.set(key, word);
+  }
+  const role = (source.target_role ?? "").replace(/\s+/g, " ").trim().slice(0, 80);
+  return `${role ? `${role} interview. ` : ""}${[...terms.values()].join(", ")}.`.slice(0, 600);
+}
+
 function normalize(text: string): string {
   return text
     .toLowerCase()
@@ -96,9 +126,9 @@ function normalize(text: string): string {
 export function cleanTranscript(text: string, segments?: VerboseSegment[]): string {
   let result = text;
   if (segments && segments.length > 0) {
-    const kept = segments.filter(
-      (segment) => !((segment.no_speech_prob ?? 0) > 0.6 && (segment.avg_logprob ?? 0) < -0.8),
-    );
+    // Whisper's own silence rule (no_speech_threshold 0.6, logprob_threshold -1.0):
+    // only segments that are both likely silent and low confidence are dropped.
+    const kept = segments.filter((segment) => !((segment.no_speech_prob ?? 0) > 0.6 && (segment.avg_logprob ?? 0) < -1));
     result = kept.map((segment) => segment.text ?? "").join(" ");
   }
   result = result.replace(/\s+/g, " ").trim();
@@ -136,20 +166,31 @@ function retryAfterMs(response: Response): number {
   return Number.isFinite(seconds) && seconds > 0 ? Math.min(60_000, seconds * 1000) : 2_000;
 }
 
-async function requestTranscription(audio: Uint8Array, timeoutMs: number): Promise<string> {
+type TranscribeOptions = {
+  /** Made while the candidate pauses: yields to real turns when the request budget runs low. */
+  speculative?: boolean;
+  /** The browser gave up on this request (e.g. the candidate kept talking). */
+  signal?: AbortSignal;
+  /** Vocabulary to prime Whisper with (see vocabularyPrompt). */
+  prompt?: string;
+};
+
+async function requestTranscription(audio: Uint8Array, timeoutMs: number, options: TranscribeOptions): Promise<string> {
   const form = new FormData();
   form.append("file", new Blob([new Uint8Array(audio)], { type: "audio/wav" }), "answer.wav");
   form.append("model", config.groq.sttModel);
   form.append("response_format", "verbose_json");
   form.append("language", "en");
   form.append("temperature", "0");
+  if (options.prompt) form.append("prompt", options.prompt);
 
   recentCalls.push(Date.now());
+  const timeout = AbortSignal.timeout(timeoutMs);
   const response = await fetch(`${config.groq.baseUrl.replace(/\/$/, "")}/audio/transcriptions`, {
     method: "POST",
     headers: { Authorization: `Bearer ${config.groq.apiKey}` },
     body: form,
-    signal: AbortSignal.timeout(timeoutMs),
+    signal: options.signal ? AbortSignal.any([timeout, options.signal]) : timeout,
   });
   if (!response.ok) {
     const detail = (await response.text().catch(() => "")).slice(0, 300);
@@ -180,18 +221,25 @@ async function requestTranscription(audio: Uint8Array, timeoutMs: number): Promi
   return cleanTranscript(data.text ?? "", data.segments);
 }
 
+const sleep = (ms: number) => new Promise((resolve) => setTimeout(resolve, ms));
+
 /**
  * Transcribe a candidate utterance with Groq Whisper. Returns "" for silence/noise.
  * `speculative` calls (made while the candidate pauses) yield to real turns when
- * the per-key request budget is nearly used up.
+ * the per-key request budget is nearly used up, and fail fast when rate limited;
+ * a real answer waits out a short rate limit instead of being lost.
  */
-export async function transcribeAudio(audio: Uint8Array, options: { speculative?: boolean } = {}): Promise<string> {
+export async function transcribeAudio(audio: Uint8Array, options: TranscribeOptions = {}): Promise<string> {
   if (!config.groq.apiKey) {
     throw new SttError("Speech recognition is not configured. Set GROQ_API_KEY.", false, "not_configured");
   }
   const now = Date.now();
   if (invalidKeyUntil > now) throw new SttError("Groq rejected the API key recently; not retrying yet.", false, "invalid_key");
-  if (rateLimitedUntil > now) throw new SttError("Groq is rate limiting this key.", false, "rate_limited", rateLimitedUntil - now);
+  if (rateLimitedUntil > now) {
+    const wait = rateLimitedUntil - now;
+    if (options.speculative || wait > REAL_TURN_RATE_LIMIT_WAIT_MS) throw new SttError("Groq is rate limiting this key.", false, "rate_limited", wait);
+    await sleep(wait);
+  }
   if (options.speculative && callsInLastMinute(now) >= SPECULATIVE_RPM_BUDGET) {
     throw new SttError("Speculative transcription budget used up.", false, "rate_limited", 5_000);
   }
@@ -201,17 +249,23 @@ export async function transcribeAudio(audio: Uint8Array, options: { speculative?
   const started = Date.now();
   const attemptTimeout = Math.round(Math.min(MAX_ATTEMPT_TIMEOUT_MS, BASE_TIMEOUT_MS + audio.byteLength / UPLOAD_BYTES_PER_MS));
   try {
-    return await requestTranscription(audio, attemptTimeout);
+    return await requestTranscription(audio, attemptTimeout, options);
   } catch (error) {
+    if (options.signal?.aborted) throw new SttError("Transcription cancelled.", false, "upstream");
+    const rateLimited = error instanceof SttError && error.reason === "rate_limited";
     const retryable = !(error instanceof SttError) || error.retryable;
     const elapsed = Date.now() - started;
-    if (!retryable || elapsed > RETRY_WINDOW_MS) {
+    if (rateLimited && !options.speculative && (error.retryAfterMs ?? 0) <= REAL_TURN_RATE_LIMIT_WAIT_MS) {
+      // A real answer: wait out a short rate limit and try once more.
+      await sleep(error.retryAfterMs ?? 1_000);
+    } else if (!retryable || elapsed > RETRY_WINDOW_MS) {
       throw error instanceof SttError ? error : new SttError(String(error), true, "upstream");
+    } else {
+      logger.warn("STT failed; retrying once", error);
+      await sleep(300);
     }
-    logger.warn("STT failed; retrying once", error);
-    await new Promise((resolve) => setTimeout(resolve, 300));
     try {
-      return await requestTranscription(audio, attemptTimeout);
+      return await requestTranscription(audio, attemptTimeout, options);
     } catch (retryError) {
       throw retryError instanceof SttError ? retryError : new SttError(String(retryError), true, "upstream");
     }

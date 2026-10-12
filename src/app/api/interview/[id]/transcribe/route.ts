@@ -5,6 +5,7 @@ import { enforceLocalRateLimit } from "@/server/rate-limit";
 import { isValidSessionId } from "@/server/sessions";
 import { logger } from "@/server/logger";
 import { MAX_AUDIO_BYTES, SttError, transcribeAudio } from "@/server/stt";
+import { promptForSession } from "@/server/stt-vocabulary";
 import { prewarmTts } from "@/server/tts";
 
 export const runtime = "nodejs";
@@ -16,7 +17,8 @@ export const maxDuration = 30;
  * candidate pauses, so STT runs inside the end-of-turn silence window. The
  * transcript is then submitted as the turn's text (flagged `voice`), removing
  * STT from the critical path. The turn applies the speaker-echo filter, so this
- * endpoint needs no database access; it is rate limited in memory per instance.
+ * endpoint only reads the database once per session (for the vocabulary prompt);
+ * it is rate limited in memory per instance.
  */
 export const POST = handler("speculative transcription", async (request: Request, { params }: { params: Promise<{ id: string }> }) => {
   const { id } = await params;
@@ -26,9 +28,12 @@ export const POST = handler("speculative transcription", async (request: Request
   // The turn request usually follows within a second: warm its TTS sockets now.
   prewarmTts(2);
   enforceLocalRateLimit("stt", clientIp(request), Math.ceil(config.limits.transcriptionsPerIpPerHour / 60), 60);
+  // The vocabulary prompt is usually cached; otherwise it loads while the audio uploads.
+  const promptPromise = promptForSession(id).catch(() => undefined);
   const audio = new Uint8Array(await request.arrayBuffer());
   try {
-    const text = await transcribeAudio(audio, { speculative: true });
+    // request.signal: the candidate kept talking and the browser dropped this speculation.
+    const text = await transcribeAudio(audio, { speculative: true, signal: request.signal, prompt: await promptPromise });
     return NextResponse.json({ text, echo: false });
   } catch (error) {
     if (error instanceof SttError) throw sttApiError(error, id);

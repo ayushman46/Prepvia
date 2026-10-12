@@ -322,6 +322,30 @@ async function scenarioConversation(browser, fixtures) {
     return `"${reply.slice(0, 80)}…"`;
   });
 
+  await step("very short spoken answers (\"Yes.\", \"No, I haven't.\") are heard and answered", async () => {
+    const heard = [];
+    for (const [i, answer] of fixtures.short.entries()) {
+      await waitForStatus(page, /Your turn/, 120_000);
+      const usersBefore = await page.getByTestId("msg-user").count();
+      await answerByVoice(page, `short answer ${i + 1}`, answer.text, answer.wav);
+      assert.equal(await page.getByTestId("msg-user").count(), usersBefore + 1, "one bubble per short answer");
+      heard.push((await page.getByTestId("msg-user").allInnerTexts()).at(-1).trim());
+      await waitForStatus(page, /Your turn/, 120_000);
+    }
+    return heard.map((t) => `"${t}"`).join(" · ");
+  });
+
+  await step("a ~30 s spoken answer with pauses arrives as one complete turn", async () => {
+    await waitForStatus(page, /Your turn/, 120_000);
+    const usersBefore = await page.getByTestId("msg-user").count();
+    await answerByVoice(page, "long answer", fixtures.long.text, fixtures.long.wav);
+    await waitForStatus(page, /Your turn/, 120_000);
+    assert.equal(await page.getByTestId("msg-user").count(), usersBefore + 1, "the long answer was split into several turns");
+    const text = (await page.getByTestId("msg-user").allInnerTexts()).at(-1);
+    assert.match(text, /patching data by hand/i, "the end of the answer is missing");
+    return `one turn, ${text.split(/\s+/).length} words`;
+  });
+
   await step("push-to-talk: speech is ignored until Space is held, then the held answer is sent", async () => {
     await page.getByTestId("capture-mode").click();
     await waitForStatus(page, /hold Space/, 5_000);
@@ -537,6 +561,20 @@ const fixtures = {
   ptt: {
     text: "I would alert on consumer lag and page the on call engineer if it keeps growing for five minutes.",
     wav: speak(dir, "ptt", "I would alert on consumer lag and page the on call engineer if it keeps growing for five minutes."),
+  },
+  short: [
+    { text: "Yes.", wav: speak(dir, "short-yes", "Yes.") },
+    { text: "No, I haven't.", wav: speak(dir, "short-no", "No, I haven't.") },
+  ],
+  long: {
+    text:
+      "Let me walk you through the whole project. We started by mapping every write path in the monolith. Then we built an outbox table so each database write and its event were committed together. " +
+      "Next we ran both systems in parallel for six weeks and compared the ledgers every night. Finally we turned off the old code path and deleted the cron jobs that had been patching data by hand.",
+    wav: speak(
+      dir,
+      "long",
+      "Let me walk you through the whole project. We started by mapping every write path in the monolith. Then we built an outbox table so each database write and its event were committed together. Next we ran both systems in parallel for six weeks and compared the ledgers every night. Finally we turned off the old code path and deleted the cron jobs that had been patching data by hand.",
+    ),
   },
   recover: {
     text: "After an incident we wrote a short report and added a load test for the hot path.",

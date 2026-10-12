@@ -84,6 +84,10 @@ export const config = {
     get sttModel() {
       return str("GROQ_STT_MODEL", "whisper-large-v3-turbo");
     },
+    /** Prime Whisper with the interview's technical vocabulary (role, job description, resume). */
+    get sttVocabularyPrompt() {
+      return bool("STT_VOCABULARY_PROMPT", true);
+    },
     /** Groq chat is only used as a fallback when NVIDIA fails or is not configured. */
     get llmFallback() {
       return bool("LLM_FALLBACK_GROQ", true);

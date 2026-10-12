@@ -27,6 +27,17 @@ vi.mock("@/server/sessions", () => ({
   markCanvasIntroduced: vi.fn(async () => {
     store.canvasIntroduced += 1;
   }),
+  amendLastAnswer: vi.fn(async (_id: string, extra: string) => {
+    const index = store.transcripts.map((t) => t.role).lastIndexOf("user");
+    if (index < 0) return null;
+    const merged = `${store.transcripts[index].content} ${extra}`;
+    store.transcripts = [...store.transcripts.slice(0, index), { role: "user", content: merged }];
+    return merged;
+  }),
+  markLastReplyHeard: vi.fn(async (_id: string, heard: string) => {
+    const last = store.transcripts.at(-1);
+    if (last?.role === "ai") last.content = `${heard} [interrupted by the candidate; the rest was never spoken]`;
+  }),
 }));
 
 const providers = vi.hoisted(() => ({
@@ -782,5 +793,82 @@ describe("runTurn: ending and premature wrap-up", () => {
     providers.tokens.mockImplementation(() => tokens(["Got it. Do you have any questions for me? <<END>>"]));
     const { events } = await run({ kind: "text", text: "Better monitoring." }, inProgress(28));
     expect(events.at(-1)).toEqual({ type: "done" });
+  });
+});
+
+describe("isEcho", () => {
+  const question = "How would you design a rate limiter for the payments API, and what trade-offs would you consider?";
+
+  it("discards the interviewer's own words picked up by the microphone", async () => {
+    const { isEcho } = await import("@/server/turn");
+    expect(isEcho("how would you design a rate limiter for the payments API", question)).toBe(true);
+    expect(isEcho("design a rate limiter for the payments API and what trade-offs would you consider", question)).toBe(true);
+  });
+
+  it("keeps real answers that reuse the question's words", async () => {
+    const { isEcho } = await import("@/server/turn");
+    expect(isEcho("I would design a rate limiter for the payments API.", question)).toBe(false);
+    expect(isEcho("We would consider the trade-offs for the payments API.", question)).toBe(false);
+    expect(isEcho("Design a token bucket rate limiter per merchant in Redis.", question)).toBe(false);
+    expect(isEcho("Yes, the payments API.", question)).toBe(false);
+  });
+});
+
+describe("runTurn: continuations and interruptions", () => {
+  it("merges a continuation into the last answer and replaces the reply the candidate never heard", async () => {
+    const asked = "Why did you choose Postgres?";
+    const unheard = "Got it. How did the team handle migrations?";
+    store.transcripts = [
+      { role: "ai", content: asked },
+      { role: "user", content: "I chose Postgres because we needed transactions." },
+      { role: "ai", content: unheard },
+    ];
+    providers.tokens.mockImplementation(() => tokens(["Makes sense. How did on-call work for that team?"]));
+    const state = { ...defaultInterviewState(), question_number: 4, questions_asked: [{ number: 4, phase: "technical", topic: "databases", question: unheard }] };
+    const { events, sessionUpdate } = await run(
+      { kind: "text", text: "and the team already knew it well.", voice: true, amend: true },
+      inProgress(6, { interview_state: state, turn_count: 3 }),
+    );
+    const merged = "I chose Postgres because we needed transactions. and the team already knew it well.";
+    expect(events.find((e) => e.type === "user_transcript")).toEqual({ type: "user_transcript", content: merged });
+    expect(store.transcripts).toEqual([
+      { role: "ai", content: asked },
+      { role: "user", content: merged },
+      { role: "ai", content: "Makes sense. How did on-call work for that team?" },
+    ]);
+    // The interviewer answered the whole answer, without the unheard reply in its context.
+    expect(providers.calls.at(-1)?.at(-1)?.content).toContain("the team already knew it well");
+    expect(JSON.stringify(providers.calls.at(-1))).not.toContain("handle migrations");
+    // Same answer, not a new one; the unheard question is no longer counted.
+    expect(sessionUpdate.incrementTurn).toBeUndefined();
+    expect(sessionUpdate.question).toMatchObject({ question_number: 4 });
+    expect(sessionUpdate.questionsAsked).toEqual([]);
+  });
+
+  it("tells the interviewer how much of an interrupted reply the candidate actually heard", async () => {
+    store.transcripts = [
+      { role: "ai", content: "Tell me about a project." },
+      { role: "user", content: "I built a ledger." },
+      { role: "ai", content: "Nice. How did you test it? And what would you change about the schema today?" },
+    ];
+    providers.tokens.mockImplementation(() => tokens(["Fair enough. What would you change about the schema?"]));
+    await run({ kind: "text", text: "Mostly contract tests with Pact.", heard: "Nice. How did you test it?" }, inProgress(5));
+    expect(JSON.stringify(providers.calls.at(-1))).toContain("Nice. How did you test it? [interrupted by the candidate");
+    expect(JSON.stringify(providers.calls.at(-1))).not.toContain("change about the schema today");
+  });
+
+  it("closes the interview when time is up and the candidate has gone quiet", async () => {
+    store.transcripts = [
+      { role: "ai", content: "Tell me about a project." },
+      { role: "user", content: "I built a ledger." },
+      { role: "ai", content: "How did you test it?" },
+    ];
+    providers.tokens.mockImplementation(() => tokens(["We're out of time. Thank you, Jane, your feedback report is ready. <<END>>"]));
+    const { events, sessionUpdate } = await run({ kind: "continue" }, inProgress(31));
+    expect(lastSystemPrompt()).toMatch(/Current section: closing/);
+    expect(events.at(-1)).toEqual({ type: "done", limit_reached: true });
+    expect(sessionUpdate.ended).toBe(true);
+    const early = await run({ kind: "continue" }, inProgress(10));
+    expect(types(early.events)).toEqual(["done"]); // not yet: nothing happens
   });
 });
