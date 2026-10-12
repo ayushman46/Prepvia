@@ -77,8 +77,8 @@ export default function SetupForm() {
     <main className="flex min-h-[100dvh] items-center justify-center bg-cream p-4 pt-28 text-vast md:p-6 md:pt-[104px]">
       <div className="card w-full max-w-3xl p-6 md:px-10 md:py-8">
         <p className="mb-2 text-center text-sm font-bold uppercase tracking-widest text-forest">Step 2 of 3</p>
-        <h1 className="mb-2 text-center font-serif text-4xl">Interview details</h1>
-        <p className="mb-6 text-center text-vast/75">Tell us who you are and what role you&apos;re aiming for.</p>
+        <h1 className="mb-2 text-center font-serif text-4xl">Set the stage</h1>
+        <p className="mb-6 text-center text-vast/75">Who you are, the role you want, and how hard Aria should push.</p>
 
         <div className="mb-6 flex items-center justify-between gap-3 rounded-2xl border-2 border-vast/15 px-4 py-3 text-sm">
           {resume ? (
@@ -147,7 +147,7 @@ export default function SetupForm() {
               maxLength={LIMITS.jobDescriptionChars}
               onChange={(e) => setJobDescription(e.target.value)}
               className="min-h-24 w-full resize-y rounded-xl border-2 border-vast bg-cream px-4 py-3 outline-none transition-shadow focus:border-forest focus:ring-4 focus:ring-forest/20"
-              placeholder="Paste the role's responsibilities and requirements for more targeted questions."
+              placeholder="Paste the posting. Aria will probe the exact skills and responsibilities it lists."
             />
           </div>
 
@@ -202,7 +202,7 @@ export default function SetupForm() {
             />
             <span>
               <span className="block font-semibold">Hands-on canvas exercise</span>
-              <span className="text-sm text-vast/65">A role-specific problem opens mid-interview to solve in an editor as you talk.</span>
+              <span className="text-sm text-vast/65">Midway through, a role-specific problem opens in an editor. Solve it while you think aloud.</span>
             </span>
           </label>
 
