@@ -88,6 +88,10 @@ export function sttErrorEvent(error: SttError): TurnEvent {
   return { type: "error", code: "stt_failed", message: "We couldn't transcribe that answer. Please try saying it again.", retryable: true };
 }
 
+/** A sentence that leads into a new topic or question (pointless once the interview is closing). */
+const TOPIC_SHIFT =
+  /\b(?:let'?s (?:switch|move|turn|shift|dive|talk|look|go|get|explore|discuss)|switch(?:ing)? gears|moving on|next,? (?:i'?d|let'?s|we|i want)|i'?d (?:now )?like to (?:ask|move|turn|switch|talk|explore|discuss|hear)|another (?:area|topic|question)|is a key part of)\b/i;
+
 const FIRST_PERSON = new Set(["i", "me", "my", "mine", "we", "us", "our", "ours"]);
 
 /**
@@ -600,17 +604,28 @@ export async function runTurn(
         }
       },
     });
+    // The goodbye is held until it's complete: if it turns out to ask something, the
+    // question and its lead-in ("Let's switch gears…") are dropped, not half-spoken.
+    const goodbye: string[] = [];
     for await (const sentence of replies) {
       // The last turn must not ask anything: the candidate could never answer it.
       if (finalTurn && sentence.includes("?")) {
         droppedQuestion = true;
         break;
       }
+      if (finalTurn) {
+        goodbye.push(sentence);
+        if (seq + goodbye.length >= MAX_SENTENCES) break;
+        continue;
+      }
       speak(sentence);
       // One question per turn, enforced: anything after the first question (or past
       // the sentence cap) would never be heard well in a voice interview.
       if (/\?["')\]]*$/.test(sentence) || seq >= MAX_SENTENCES) break;
     }
+    // Keep only an acknowledgement of the last answer before the closing line.
+    const kept = droppedQuestion ? goodbye.slice(0, 1).filter((sentence) => !TOPIC_SHIFT.test(sentence)) : goodbye;
+    kept.forEach(speak);
   } catch (error) {
     generationError = error;
     logger.error("Interviewer generation failed", error, { sessionId, sentences: sentences.length });

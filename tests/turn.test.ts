@@ -872,3 +872,21 @@ describe("runTurn: continuations and interruptions", () => {
     expect(types(early.events)).toEqual(["done"]); // not yet: nothing happens
   });
 });
+
+describe("runTurn: the closing turn", () => {
+  it("drops a question and its lead-in when time is up, keeping only the acknowledgement", async () => {
+    store.transcripts = [
+      { role: "ai", content: "What was the biggest trade-off?" },
+      { role: "user", content: "Shipping a limited payout window first." },
+    ];
+    providers.tokens.mockImplementation(() =>
+      tokens(["Thanks for sharing that. ", "Let's switch gears a bit. ", "In this role, discovery is a key part of the job. ", "How do you run discovery?"]),
+    );
+    const { events } = await run({ kind: "text", text: "We validated it with ten merchants first." }, inProgress(40));
+    const said = events.filter((e) => e.type === "ai_sentence").map((e) => (e as { content: string }).content);
+    expect(said[0]).toBe("Thanks for sharing that.");
+    expect(said.join(" ")).not.toMatch(/switch gears|discovery|\?/);
+    expect(said.at(-1)).toBe(closingLine("Jane"));
+    expect(events.at(-1)).toEqual({ type: "done", limit_reached: true });
+  });
+});
