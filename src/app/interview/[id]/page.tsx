@@ -161,9 +161,18 @@ function InterviewRoom() {
     setNoisyRoom(false);
   };
 
+  /** ?debug=1: every voice decision, readable from the console as window.__vadEvents (diagnostics). */
+  const logVad = (event: string, detail: Record<string, unknown> = {}) => {
+    if (!debug) return;
+    const w = window as unknown as { __vadEvents?: Record<string, unknown>[] };
+    (w.__vadEvents ??= []).push({ t: Math.round(performance.now()), event, ...detail });
+    if (w.__vadEvents.length > 500) w.__vadEvents.splice(0, 100);
+  };
+
   const vadCallbacks = useMemo(
     () => ({
       onSpeculate: (audio: Float32Array, id: number) => {
+        logVad("speculate", { id, seconds: +(audio.length / 16_000).toFixed(1) });
         if (performance.now() < speculationBlockedUntil.current) return endpointRef.current(id, "unknown");
         const controller = new AbortController();
         const promise = transcribeSpeculative(sessionId, encodeWav(audio), controller.signal).catch((error: unknown) => {
@@ -176,9 +185,11 @@ function InterviewRoom() {
         speculations.current.set(id, { promise, controller });
         // Decide from what was said so far whether the candidate has finished (nothing
         // heard: end now; "…and" / "let me think": give them time to continue).
-        void promise.then((result) =>
-          endpointRef.current(id, !result ? "unknown" : result.echo || !result.text.trim() ? "complete" : classifyEndpoint(result.text)),
-        );
+        void promise.then((result) => {
+          const kind = !result ? "unknown" : result.echo || !result.text.trim() ? "complete" : classifyEndpoint(result.text);
+          logVad("endpoint", { id, kind, text: result?.text ?? null });
+          endpointRef.current(id, kind);
+        });
       },
       onCancelSpeculation: (id: number) => {
         speculations.current.get(id)?.controller.abort();
@@ -189,11 +200,13 @@ function InterviewRoom() {
         for (const [id, speculation] of speculations.current) if (id !== speculationId) speculation.controller.abort();
         speculations.current.clear();
         const wav = encodeWav(audio);
+        logVad("utterance", { seconds: +(audio.length / 16_000).toFixed(1), speculationId, turnStatus });
         // Cut Aria off just as she started replying? Then the candidate was still answering.
         if (interview.amend(wav, endedAt, transcript)) return;
         void sendTurn({ audio: wav, transcript }, { inputAt: endedAt });
       },
       onRejected: (reason: "short" | "quiet") => {
+        logVad("rejected", { reason, started });
         if (!started) return; // the lobby microphone check
         noteNoise();
         if (reason === "quiet") hint("faint", "I can hear you only faintly. Move closer to the microphone or reduce background noise.", 20_000);
@@ -203,6 +216,7 @@ function InterviewRoom() {
         void pushEndRef.current();
       },
       onDropped: (audio: Float32Array, endedAt: number) => {
+        logVad("dropped", { seconds: +(audio.length / 16_000).toFixed(1), turnStatus, started, candidateHold: interview.candidateHold, muted, limitReached });
         if (!started) return; // the lobby microphone check
         // The candidate kept talking after their answer was sent: before Aria's reply is
         // heard, it's part of the same answer.
@@ -212,6 +226,7 @@ function InterviewRoom() {
         hint("busy", "Aria is still thinking. Please repeat that once she has replied.", 10_000);
       },
       onSpeechActivity: (activity: SpeechActivity) => {
+        logVad("activity", { activity, turnStatus });
         if (captureMode === "auto") interview.holdForCandidate(activity);
       },
       onFrame: (probability: number, level: number, rms: number, noiseFloor: number) => {

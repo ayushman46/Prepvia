@@ -23,8 +23,11 @@ export const END_OF_TURN_MS: Record<EndpointKind, number> = {
 };
 /** Silence that ends an utterance while its pause's transcript is still on its way. */
 const PENDING_END_MS = END_OF_TURN_MS.incomplete;
-const POSITIVE_THRESHOLD = 0.5;
-const NEGATIVE_THRESHOLD = 0.35;
+// Measured on a real candidate's voice (MacBook microphone, quiet room): Silero gave
+// most of their speech 0.35-0.8, so 0.5 dropped whole answers as false starts.
+// vad-web's own defaults for v5 are 0.3 / 0.25; the noise gate below filters the rest.
+const POSITIVE_THRESHOLD = 0.4;
+const NEGATIVE_THRESHOLD = 0.3;
 const PRE_SPEECH_PAD_MS = 300;
 const MIN_SPEECH_MS = 250;
 /** Silero v5 processes 512-sample frames at 16 kHz. */
@@ -44,6 +47,8 @@ const GATE: GateOptions = {
   minSpeechRms: 0.006,
   // "No." / "Yep." can be ~200 ms of voicing: accept 160 ms unbroken if clearly close (18 dB over the room).
   shortWord: { minRun: 5, minSnrDb: 18 },
+  // A loud, close voice the model is only moderately sure about is still the candidate.
+  nearVoice: { minProbability: 0.4, minSnrDb: 18 },
 };
 const MAX_SPECULATIONS_PER_MINUTE = 8;
 /** Push-to-talk keeps this much audio from just before the button was pressed, and after release. */

@@ -140,7 +140,38 @@ function noiseSource(seed = 7) {
  * Compose a clip. Segments: { text, voice?, rate?, gain? } or { pause: ms }.
  * Options: { lead: ms of silence before, tail: ms after, noise: RMS of a noise bed }.
  */
-function compose(segments, { lead = 400, tail = 300, noise = 0, defaultVoice = "Samantha" } = {}) {
+const BABBLE_LINES = [
+  "Did you see the match last night, it went to extra time and everyone was shouting.",
+  "I think we should order lunch soon, the place downstairs closes early on Fridays.",
+  "Can you send me that document again, I could not find it in my email this morning.",
+  "My sister is visiting next week so I need to clean the whole apartment before Saturday.",
+  "The traffic was terrible today, it took me almost an hour to get here from the station.",
+];
+let babbleCache = null;
+/** Other people talking in the room: two voices taking turns, continuous. */
+function babble(length) {
+  babbleCache ??= BABBLE_LINES.flatMap((line, i) => [say(line, i % 2 ? "Daniel" : "Karen", 185), new Float32Array(RATE * 0.25)]);
+  const out = new Float32Array(length);
+  let offset = 0;
+  while (offset < length) {
+    for (const part of babbleCache) {
+      if (offset >= length) break;
+      out.set(part.subarray(0, Math.min(part.length, length - offset)), offset);
+      offset += part.length;
+    }
+  }
+  return out;
+}
+
+/** Two conversations at once (no gaps at all), like a TV plus people talking. */
+function continuousBabble(length) {
+  const a = babble(length + RATE * 3);
+  const out = new Float32Array(length);
+  for (let i = 0; i < length; i++) out[i] = a[i] + a[i + Math.round(RATE * 2.7)];
+  return out;
+}
+
+function compose(segments, { lead = 400, tail = 300, noise = 0, voices = null, continuous = false, defaultVoice = "Samantha" } = {}) {
   const parts = [];
   const words = [];
   let total = Math.round((lead / 1000) * RATE);
@@ -181,6 +212,15 @@ function compose(segments, { lead = 400, tail = 300, noise = 0, defaultVoice = "
     const bedRms = Math.sqrt(bed.reduce((n, v) => n + v * v, 0) / bed.length);
     for (let i = 0; i < samples.length; i++) samples[i] += (bed[i] / bedRms) * noise;
   }
+  if (voices !== null) {
+    // Background talkers at `voices` dB relative to the candidate's speech level.
+    const speech = speechRanges.flatMap(([a, b]) => Array.from(samples.subarray(a, b)));
+    const speechRms = Math.sqrt(speech.reduce((n, v) => n + v * v, 0) / Math.max(1, speech.length));
+    const bed = continuous ? continuousBabble(samples.length) : babble(samples.length);
+    const bedRms = Math.sqrt(bed.reduce((n, v) => n + v * v, 0) / bed.length);
+    const gain = (speechRms * 10 ** (voices / 20)) / bedRms;
+    for (let i = 0; i < samples.length; i++) samples[i] += bed[i] * gain;
+  }
   return { samples, text: words.join(" "), speechRanges, seconds: samples.length / RATE };
 }
 
@@ -209,6 +249,14 @@ const CLIPS = [
   { id: "pause-1.5", what: "1.5 s thinking pause mid-answer", segments: [{ text: "I chose Postgres because we needed transactions" }, { pause: 1500 }, { text: "and the team already knew it well, which mattered for on call." }] },
   { id: "pause-2.0", what: "2.0 s thinking pause after a conjunction", segments: [{ text: "We split the monolith into three services, and" }, { pause: 2000 }, { text: "the hardest part was migrating the shared user table without downtime." }] },
   { id: "pause-3.0", what: "3.0 s thinking pause, two thoughts", segments: [{ text: "My biggest weakness is probably delegation." }, { pause: 3000 }, { text: "Lately I have been pairing junior engineers on design reviews to get better at it." }] },
+  // People talking in the room the whole time (continuing after the answer), as in a shared flat or office.
+  { id: "voices-12db", what: "background voices 12 dB below the candidate", segments: [{ text: ANSWER_B }], voices: -12, tail: 5000 },
+  { id: "voices-6db", what: "background voices 6 dB below the candidate", segments: [{ text: ANSWER_A }], voices: -6, tail: 5000 },
+  { id: "voices-3db", what: "loud background voices, 3 dB below the candidate", segments: [{ text: ANSWER_C }], voices: -3, tail: 5000 },
+  { id: "room-12db", what: "nonstop background talk 12 dB below the candidate", segments: [{ text: ANSWER_B }], voices: -12, continuous: true, tail: 6000 },
+  { id: "room-8db", what: "nonstop background talk 8 dB below the candidate", segments: [{ text: ANSWER_C }], voices: -8, continuous: true, tail: 6000 },
+  { id: "room-short", what: "\"Yes, I have.\" over nonstop talk 10 dB below", segments: [{ text: "Yes, I have." }], voices: -10, continuous: true, tail: 6000 },
+  { id: "voices-short", what: "\"Yes, I have.\" with voices 6 dB below", segments: [{ text: "Yes, I have." }], voices: -6, tail: 5000 },
   { id: "think-3s", what: "\"Let me think.\" then 3 s of silence", segments: [{ text: "Let me think." }, { pause: 3000 }, { text: "I would keep a min heap of size k and compare each new element with the root." }] },
   { id: "two-continuations", what: "finished sentence, then two more after 1.2 s pauses", segments: [
     { text: "I would add a cache in front of the database." }, { pause: 1200 },
@@ -401,7 +449,7 @@ await assertPortFree(FAKE_PORT);
 
 console.log(`Synthesizing ${CLIPS.length} clips…`);
 for (const clip of CLIPS) {
-  Object.assign(clip, compose(clip.segments, { noise: clip.noise }));
+  Object.assign(clip, compose(clip.segments, { noise: clip.noise, voices: clip.voices ?? null, continuous: !!clip.continuous, tail: clip.tail ?? 300 }));
   clip.b64 = writeWav(clip.samples).toString("base64");
 }
 

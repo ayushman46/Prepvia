@@ -99,6 +99,30 @@ describe("UtteranceTracker noise gate", () => {
     for (let i = 0; i < count; i++) tracker.frame(p, frame(level));
   };
 
+  it("accepts a loud, close voice that Silero is only moderately sure about (measured on a real candidate)", () => {
+    const nearGate = { ...GATE, nearVoice: { minProbability: 0.4, minSnrDb: 18 } };
+    const profile = [0.45, 0.62, 0.55, 0.71, 0.48, 0.66, 0.58, 0.52, 0.74, 0.61, 0.44, 0.69];
+    const speak = (tracker: UtteranceTracker, level: number) => {
+      for (let round = 0; round < 3; round++) for (const p of profile) tracker.frame(p, frame(level));
+    };
+    // Quiet room (RMS 0.002), voice at RMS 0.2: rejected by the old gate, accepted now.
+    const old = makeTracker({ gate: GATE, positiveThreshold: 0.4, negativeThreshold: 0.3 }).tracker;
+    const now = makeTracker({ gate: nearGate, positiveThreshold: 0.4, negativeThreshold: 0.3 }).tracker;
+    for (const tracker of [old, now]) {
+      feedAt(tracker, 0.02, 0.002, 60);
+      speak(tracker, 0.2);
+      feedAt(tracker, 0.02, 0.002, 25);
+    }
+    expect(old.takeEnded()).toMatchObject({ accepted: false });
+    expect(now.takeEnded()).toMatchObject({ accepted: true });
+    // The same moderate speech from across the room (+6 dB) is still background.
+    const distant = makeTracker({ gate: nearGate, positiveThreshold: 0.4, negativeThreshold: 0.3 }).tracker;
+    feedAt(distant, 0.02, 0.01, 60);
+    speak(distant, 0.02);
+    feedAt(distant, 0.02, 0.01, 25);
+    expect(distant.takeEnded()).toMatchObject({ accepted: false });
+  });
+
   it("rejects speech-like sound that is barely above the room noise (distant voices)", () => {
     const { tracker, onSpeculate } = makeTracker({ gate: GATE, speculateAfterMs: 350 });
     feedAt(tracker, 0.05, 0.01, 60); // room at RMS 0.01

@@ -32,6 +32,12 @@ export type GateOptions = {
    * speech when it is clearly close to the microphone: this far above the floor.
    */
   shortWord?: { minRun: number; minSnrDb: number };
+  /**
+   * Some voices (and some microphones' processing) only get moderate speech
+   * probabilities from Silero. Sound this far above the room that is still at least
+   * this speech-like counts as confident: a loud, close voice is the candidate.
+   */
+  nearVoice?: { minProbability: number; minSnrDb: number };
 };
 
 export type TrackerOptions = {
@@ -333,9 +339,10 @@ export class UtteranceTracker {
   private updateGate(probability: number, db: number): void {
     const gate = this.options.gate;
     if (!gate) return;
-    const speech = probability >= gate.confidentThreshold;
-    const loud = this.isLoud(db);
     const snr = db - this.floorDb;
+    const near = !!gate.nearVoice && probability >= gate.nearVoice.minProbability && snr >= gate.nearVoice.minSnrDb;
+    const speech = probability >= gate.confidentThreshold || near;
+    const loud = this.isLoud(db);
     if (speech && loud) {
       this.heardFrames++;
       this.heardRun++;
