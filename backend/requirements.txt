@@ -1,9 +1,0 @@
-fastapi
-uvicorn[standard]
-motor
-openai
-groq
-edge-tts
-pypdf
-python-multipart
-httpx
