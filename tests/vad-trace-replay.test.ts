@@ -49,7 +49,7 @@ function replay(attempt: Attempt, settings: typeof SETTINGS = SETTINGS): Utteran
   return verdicts;
 }
 
-const attempts = (trace as { attempts: Attempt[] }).attempts;
+const attempts = (trace as unknown as { attempts: Attempt[] }).attempts;
 
 describe("real user trace replay (listen-2026-10-12T13-48-15)", () => {
   it("has the six real speech attempts", () => {
