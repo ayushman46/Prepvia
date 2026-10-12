@@ -37,7 +37,17 @@ export type GateOptions = {
    * probabilities from Silero. Sound this far above the room that is still at least
    * this speech-like counts as confident: a loud, close voice is the candidate.
    */
-  nearVoice?: { minProbability: number; minSnrDb: number };
+  nearVoice?: {
+    minProbability: number;
+    minSnrDb: number;
+    /**
+     * Guard: loud, near-voice utterances must also contain this many loud frames
+     * that are at least `strongProbability` speech (defaults 3 at 0.6), so a
+     * sustained loud sound Silero is unsure about (fan gust, chair scrape) fails.
+     */
+    minStrongFrames?: number;
+    strongProbability?: number;
+  };
 };
 
 export type TrackerOptions = {
@@ -124,6 +134,9 @@ export class UtteranceTracker {
   private run = 0;
   private maxRun = 0;
   private heardFrames = 0;
+  /** Loud frames that are clearly speech-like (nearVoice guard), with and without the floor. */
+  private strongFrames = 0;
+  private heardStrongFrames = 0;
   private heardRun = 0;
   private heardMaxRun = 0;
   /** Loudest confident frame relative to the noise floor (dB), with and without the floor. */
@@ -310,6 +323,7 @@ export class UtteranceTracker {
     this.maxRun = Math.max(this.maxRun, this.heardMaxRun);
     this.run = Math.max(this.run, this.heardRun);
     this.peakSnrDb = Math.max(this.peakSnrDb, this.heardPeakSnrDb);
+    this.strongFrames = Math.max(this.strongFrames, this.heardStrongFrames);
   }
 
   private finishSegment(): UtteranceVerdict {
@@ -343,8 +357,10 @@ export class UtteranceTracker {
     const near = !!gate.nearVoice && probability >= gate.nearVoice.minProbability && snr >= gate.nearVoice.minSnrDb;
     const speech = probability >= gate.confidentThreshold || near;
     const loud = this.isLoud(db);
+    const strong = probability >= (gate.nearVoice?.strongProbability ?? 0.6);
     if (speech && loud) {
       this.heardFrames++;
+      if (strong) this.heardStrongFrames++;
       this.heardRun++;
       this.heardMaxRun = Math.max(this.heardMaxRun, this.heardRun);
       this.heardPeakSnrDb = Math.max(this.heardPeakSnrDb, snr);
@@ -354,6 +370,7 @@ export class UtteranceTracker {
     const confident = speech && (this.options.isAccepting?.() ?? true);
     if (confident && loud) {
       this.confidentFrames++;
+      if (strong) this.strongFrames++;
       this.run++;
       this.maxRun = Math.max(this.maxRun, this.run);
       this.peakSnrDb = Math.max(this.peakSnrDb, snr);
@@ -364,19 +381,20 @@ export class UtteranceTracker {
   }
 
   /** Enough confident speech, or one crisp close word. */
-  private gatePasses(frames: number, maxRun: number, peakSnrDb: number): boolean {
+  private gatePasses(frames: number, maxRun: number, peakSnrDb: number, strongFrames: number): boolean {
     const gate = this.options.gate;
     if (!gate) return true;
+    if (gate.nearVoice && strongFrames < (gate.nearVoice.minStrongFrames ?? 3)) return false;
     if (frames >= gate.minConfidentFrames && maxRun >= gate.minConfidentRun) return true;
     return !!gate.shortWord && maxRun >= gate.shortWord.minRun && peakSnrDb >= gate.shortWord.minSnrDb;
   }
 
   private passes(): boolean {
-    return this.gatePasses(this.confidentFrames, this.maxRun, this.peakSnrDb);
+    return this.gatePasses(this.confidentFrames, this.maxRun, this.peakSnrDb, this.strongFrames);
   }
 
   private heard(): boolean {
-    return this.gatePasses(this.heardFrames, this.heardMaxRun, this.heardPeakSnrDb);
+    return this.gatePasses(this.heardFrames, this.heardMaxRun, this.heardPeakSnrDb, this.heardStrongFrames);
   }
 
   private withinBudget(): boolean {
@@ -420,6 +438,8 @@ export class UtteranceTracker {
     this.run = 0;
     this.maxRun = 0;
     this.heardFrames = 0;
+    this.strongFrames = 0;
+    this.heardStrongFrames = 0;
     this.heardRun = 0;
     this.heardMaxRun = 0;
     this.peakSnrDb = -Infinity;
