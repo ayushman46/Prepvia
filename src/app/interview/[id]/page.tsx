@@ -2,8 +2,8 @@
 
 import Link from "next/link";
 import { useParams, useRouter, useSearchParams } from "next/navigation";
-import { Suspense, useEffect, useMemo, useRef, useState, type FormEvent, type MutableRefObject, type ReactNode } from "react";
-import { Hand, Keyboard, Mic, MicOff, RotateCcw, Send, X } from "lucide-react";
+import { Suspense, useEffect, useMemo, useRef, useState, useSyncExternalStore, type FormEvent, type MutableRefObject, type ReactNode } from "react";
+import { Check, Code2, Hand, Headphones, Keyboard, Loader2, Mic, MicOff, Pause, RotateCcw, Send, Volume2 } from "lucide-react";
 import { CanvasPanel } from "@/components/CanvasPanel";
 import { InterviewerOrb, type OrbMode } from "@/components/InterviewerOrb";
 import { TranscriptPane } from "@/components/TranscriptPane";
@@ -53,6 +53,19 @@ function formatClock(totalSeconds: number) {
   return `${sign}${String(Math.floor(s / 60)).padStart(2, "0")}:${String(Math.floor(s % 60)).padStart(2, "0")}`;
 }
 
+/** Touch-first device: copy talks about tapping and holding the button, not Space. */
+const subscribeCoarse = (onChange: () => void) => {
+  const query = window.matchMedia("(pointer: coarse)");
+  query.addEventListener("change", onChange);
+  return () => query.removeEventListener("change", onChange);
+};
+const useCoarsePointer = () =>
+  useSyncExternalStore(
+    subscribeCoarse,
+    () => window.matchMedia("(pointer: coarse)").matches,
+    () => false,
+  );
+
 function InterviewRoom() {
   const params = useParams<{ id: string }>();
   const router = useRouter();
@@ -92,6 +105,26 @@ function InterviewRoom() {
   const markVoiceUnavailable = interview.markVoiceUnavailable;
 
   const integrity = useIntegrity(sessionId, started && !limitReached && !ending);
+  const coarse = useCoarsePointer();
+  const answerRef = useRef<HTMLTextAreaElement>(null);
+
+  // End-interview confirmation: Escape or a click outside closes it.
+  const endWrapRef = useRef<HTMLDivElement>(null);
+  useEffect(() => {
+    if (!confirmEnd || ending) return;
+    const onKey = (event: KeyboardEvent) => {
+      if (event.key === "Escape") setConfirmEnd(false);
+    };
+    const onPointer = (event: PointerEvent) => {
+      if (!endWrapRef.current?.contains(event.target as Node)) setConfirmEnd(false);
+    };
+    window.addEventListener("keydown", onKey);
+    window.addEventListener("pointerdown", onPointer);
+    return () => {
+      window.removeEventListener("keydown", onKey);
+      window.removeEventListener("pointerdown", onPointer);
+    };
+  }, [confirmEnd, ending]);
 
   const candidateHold = interview.candidateHold;
   // While Aria's reply is held for a candidate who kept talking, their speech is a continuation (see onDropped).
@@ -410,6 +443,7 @@ function InterviewRoom() {
     if (!text || turnStatus === "processing" || limitReached) return;
     if (turnStatus === "speaking") interview.interrupt();
     setDraft("");
+    if (answerRef.current) answerRef.current.style.height = "";
     void sendTurn({ text });
   };
 
@@ -468,7 +502,10 @@ function InterviewRoom() {
 
   const hasAnswers = messages.some((m) => m.role === "user" && m.content);
   const resuming = session.transcript.length > 1;
-  const remaining = interview.startedAt ? session.duration_minutes * 60 - (now - interview.startedAt) / 1000 : session.duration_minutes * 60;
+  // Never more than the interview length (the clock may have ticked before startedAt was set).
+  const remaining = interview.startedAt
+    ? Math.min(session.duration_minutes * 60, session.duration_minutes * 60 - (now - interview.startedAt) / 1000)
+    : session.duration_minutes * 60;
   const sectionLabel = SECTION_LABELS[interview.section ?? (questionNumber === 0 ? "opening" : "background")] ?? "Interview";
   const userSpeaking = vad.userSpeaking && (accepting || turnStatus === "speaking");
 
@@ -480,7 +517,9 @@ function InterviewRoom() {
         ? "thinking"
         : userSpeaking
           ? "listening"
-          : "idle";
+          : turnStatus === "ready" && !limitReached && !ending
+            ? "waiting"
+            : "idle";
 
   const statusLabel = !started
     ? "Waiting to start"
@@ -491,11 +530,13 @@ function InterviewRoom() {
         : turnStatus === "processing"
           ? "Thinking…"
           : turnStatus === "speaking"
-            ? captureMode === "push" && micLive
-              ? "Aria is speaking · hold Space to interrupt and answer"
-              : allowInterrupt && micLive
-                ? "Aria is speaking · talk or press Space to interrupt"
-                : "Aria is speaking"
+            ? coarse && micLive && (captureMode === "push" || allowInterrupt)
+              ? "Aria is speaking · tap Interrupt"
+              : captureMode === "push" && micLive
+                ? "Aria is speaking · hold Space to interrupt and answer"
+                : allowInterrupt && micLive
+                  ? "Aria is speaking · talk or press Space to interrupt"
+                  : "Aria is speaking"
             : limitReached
               ? "Interview complete"
               : !micLive
@@ -507,10 +548,32 @@ function InterviewRoom() {
                 : captureMode === "push"
                   ? holding
                     ? "Recording… release to send"
-                    : "Your turn · hold Space or the button to answer"
+                    : coarse
+                      ? "Your turn · hold the button to answer"
+                      : "Your turn · hold Space or the button to answer"
                   : userSpeaking
                     ? "Listening…"
-                    : "Your turn · speak naturally";
+                    : textMode
+                      ? "Your turn · speak naturally or type"
+                      : "Your turn · speak naturally";
+
+  /** Whose move it is, shown by the status pill's colour and icon (not only its text). */
+  const statusTone: "aria" | "you" | "busy" | "done" | "off" = !started
+    ? "done"
+    : ending
+      ? "busy"
+      : candidateHold
+        ? "you"
+        : turnStatus === "processing"
+          ? "busy"
+          : turnStatus === "speaking"
+            ? "aria"
+            : limitReached
+              ? "done"
+              : !micLive && !typing
+                ? "off"
+                : "you";
+  const StatusIcon = { aria: Volume2, you: micLive ? Mic : Keyboard, busy: Loader2, done: Check, off: MicOff }[statusTone];
 
   const captureIssueText: Record<string, string> = {
     ended: "Your microphone stopped. It may have been disconnected.",
@@ -520,20 +583,41 @@ function InterviewRoom() {
   };
 
   const stage = (
-    <section className="relative flex min-h-0 flex-1 flex-col overflow-hidden rounded-[28px] border-2 border-vast bg-vast p-4 text-cream md:rounded-[40px] md:p-6">
-      {/* Compact on phones (orb beside the status) so the transcript keeps most of the screen. */}
-      <div className="flex items-center justify-center gap-3 pb-2 md:flex-col md:gap-2">
-        <InterviewerOrb mode={orbMode} getOutputLevel={getOutputLevel} micLevelRef={micLevel} className="w-14 shrink-0 md:w-32" />
-        <div className="flex min-w-0 flex-col items-start gap-1 md:items-center md:gap-2">
+    <section
+      className={cn(
+        "relative flex min-h-0 flex-1 flex-col overflow-hidden rounded-[28px] border-2 border-vast bg-vast p-4 text-cream",
+        // Beside the canvas: the same radius and a compact header, so the transcript keeps the room.
+        hasCanvas ? "md:rounded-[28px] md:p-4" : "md:rounded-[40px] md:p-6",
+      )}
+    >
+      {/* Compact on phones (orb pinned left, beside the status) so the transcript keeps most of the screen. */}
+      <div className={cn("flex items-center justify-start gap-3 pb-2 md:justify-center", !hasCanvas && "md:flex-col md:gap-2")}>
+        <InterviewerOrb mode={orbMode} getOutputLevel={getOutputLevel} micLevelRef={micLevel} className={cn("w-14 shrink-0", !hasCanvas && "md:w-32")} />
+        <div className={cn("flex min-w-0 flex-1 flex-col items-start gap-1 md:flex-none", !hasCanvas && "md:items-center md:gap-2")}>
           <p className="font-serif text-lg leading-none">Aria</p>
-          <p className="rounded-full border-2 border-vast bg-forest px-4 py-1 text-sm font-bold md:text-center" aria-live="polite" data-testid="status">
-            {statusLabel}
+          <p
+            className={cn(
+              "flex max-w-full items-center gap-1.5 rounded-full border-2 px-3 py-1 text-sm font-bold transition-colors",
+              !hasCanvas && "md:text-center",
+              {
+                aria: "border-vast bg-cream text-vast",
+                you: "border-vast bg-lavender text-vast",
+                busy: "border-cream/30 bg-transparent text-cream/80",
+                done: "border-cream/30 bg-transparent text-cream/80",
+                off: "border-ember bg-transparent text-ember",
+              }[statusTone],
+            )}
+            aria-live="polite"
+            data-testid="status"
+          >
+            <StatusIcon size={15} className={cn("shrink-0", statusTone === "busy" && "animate-spin")} aria-hidden />
+            <span className="truncate">{statusLabel}</span>
           </p>
         </div>
       </div>
 
       <div className="relative z-0 flex min-h-0 flex-1 flex-col overflow-hidden">
-        <TranscriptPane messages={messages} candidateName={session.candidate_name} />
+        <TranscriptPane messages={messages} candidateName={session.candidate_name} compact={hasCanvas} />
       </div>
 
       <footer className="z-10 flex flex-col items-center gap-2 pt-2">
@@ -614,7 +698,7 @@ function InterviewRoom() {
                   <Hand size={15} /> Interrupt
                 </button>
               )}
-              {micLive && turnStatus !== "speaking" && captureMode === "auto" && <MicMeter levelRef={micLevel} active={accepting} />}
+              {micLive && !typing && turnStatus !== "speaking" && captureMode === "auto" && <MicMeter levelRef={micLevel} active={accepting} />}
             </div>
             {micLive && captureMode === "push" && (
               <button
@@ -636,13 +720,13 @@ function InterviewRoom() {
                 <Mic size={18} /> {holding ? "Release to send" : "Hold to talk"}
               </button>
             )}
-            {micLive && (
+            {micLive && (turnStatus === "ready" || captureMode === "push") && (
               <button
                 onClick={(e) => {
                   e.currentTarget.blur();
                   setCaptureMode(captureMode === "auto" ? "push" : "auto");
                 }}
-                className="text-xs text-cream/60 underline underline-offset-4"
+                className={cn("text-xs text-cream/60 underline underline-offset-4", typing && "hidden sm:inline")}
                 data-testid="capture-mode"
               >
                 {captureMode === "auto" ? "Noisy room? Use push-to-talk" : "Switch to hands-free"}
@@ -652,9 +736,16 @@ function InterviewRoom() {
               <form onSubmit={submitText} className="flex w-full max-w-2xl gap-2">
                 <label htmlFor="answer" className="sr-only">Type your answer</label>
                 <textarea
+                  ref={answerRef}
                   id="answer"
                   value={draft}
-                  onChange={(e) => setDraft(e.target.value)}
+                  onChange={(e) => {
+                    setDraft(e.target.value);
+                    // Grow with the answer where field-sizing isn't supported.
+                    const t = e.currentTarget;
+                    t.style.height = "auto";
+                    t.style.height = `${t.scrollHeight}px`;
+                  }}
                   onKeyDown={(e) => {
                     if (e.key === "Enter" && !e.shiftKey) submitText(e);
                   }}
@@ -665,12 +756,12 @@ function InterviewRoom() {
                   maxLength={LIMITS.answerChars}
                   rows={2}
                   placeholder={turnStatus === "processing" ? "Wait for the interviewer…" : "Type your answer and press Enter…"}
-                  className="flex-1 resize-none rounded-2xl border-2 border-vast bg-cream px-4 py-3 text-vast outline-none focus:bg-white"
+                  className="max-h-40 min-h-[3.25rem] flex-1 resize-none overflow-y-auto rounded-2xl border-2 border-vast bg-cream px-4 py-3 text-vast outline-none [field-sizing:content] focus:bg-white"
                 />
                 <button
                   type="submit"
                   disabled={!draft.trim() || turnStatus === "processing"}
-                  className="rounded-2xl border-2 border-vast bg-lavender px-4 text-vast transition-transform hover:-translate-y-0.5 disabled:opacity-50 disabled:hover:translate-y-0"
+                  className="h-[3.25rem] self-end rounded-2xl border-2 border-vast bg-lavender px-4 text-vast transition-transform hover:-translate-y-0.5 disabled:opacity-50 disabled:hover:translate-y-0"
                   aria-label="Send answer"
                 >
                   <Send size={20} />
@@ -686,14 +777,17 @@ function InterviewRoom() {
   return (
     <div className="flex h-[100dvh] flex-col gap-2 bg-cream p-2 md:gap-3 md:p-4">
       {/* Top bar */}
-      <header className="flex flex-wrap items-center justify-between gap-2 rounded-[22px] border-2 border-vast bg-cream px-4 py-2">
-        <div className="min-w-0">
+      <header className="flex flex-nowrap items-center justify-between gap-2 rounded-[22px] border-2 border-vast bg-cream px-3 py-2 sm:px-4">
+        <div className="min-w-0 flex-1">
           <h1 className="truncate font-serif text-xl md:text-2xl">{session.target_role}</h1>
-          <p className="text-xs text-vast/60">
+          <p className="truncate text-xs text-vast/60 sm:hidden">
+            {sectionLabel} · Q{Math.max(questionNumber, 1)}
+          </p>
+          <p className="hidden truncate text-xs text-vast/60 sm:block">
             {session.interview_type[0].toUpperCase() + session.interview_type.slice(1)} interview · {session.level} level · Question {Math.max(questionNumber, 1)}
           </p>
         </div>
-        <div className="flex items-center gap-2">
+        <div className="flex shrink-0 items-center gap-1.5 sm:gap-2">
           <span className="hidden rounded-full border-2 border-vast bg-lavender px-3 py-1 text-xs font-bold sm:inline" data-testid="section">
             {sectionLabel}
           </span>
@@ -710,7 +804,8 @@ function InterviewRoom() {
           {started && micAvailable && !limitReached && (
             <button
               onClick={toggleMute}
-              className={cn("icon-btn", muted && "bg-ember")}
+              className={cn("icon-btn", muted && "bg-ember hover:bg-ember")}
+              aria-pressed={muted}
               aria-label={muted ? "Unmute microphone" : "Mute microphone"}
               title={muted ? "Unmute" : "Mute"}
             >
@@ -718,30 +813,60 @@ function InterviewRoom() {
             </button>
           )}
           {started && !limitReached && (
-            <button onClick={() => setTextMode((v) => !v)} className={cn("icon-btn", typing && "bg-lavender")} aria-label="Type an answer" title="Type instead">
+            <button
+              onClick={() => setTextMode((v) => !v)}
+              className={cn("icon-btn", typing && "bg-lavender hover:bg-lavender")}
+              aria-pressed={typing}
+              aria-label="Type an answer"
+              title={typing ? "Back to voice" : "Type instead"}
+            >
               <Keyboard size={18} />
             </button>
           )}
-          {limitReached ? null : confirmEnd ? (
-            <div className="flex items-center gap-2">
-              <button onClick={finish} disabled={ending} className="rounded-xl border-2 border-vast bg-ember px-3 py-2 text-sm font-bold">
-                {ending ? "Saving…" : hasAnswers ? "End & get report" : "End anyway"}
+          {!limitReached && (
+            <div ref={endWrapRef} className="relative">
+              <button
+                onClick={() => setConfirmEnd((v) => !v)}
+                className="rounded-xl border-2 border-vast bg-vast px-3 py-2 text-sm font-bold text-cream"
+                aria-label="End interview"
+                aria-haspopup="dialog"
+                aria-expanded={confirmEnd}
+              >
+                <span className="sm:hidden">End</span>
+                <span className="hidden sm:inline">End interview</span>
               </button>
-              <button onClick={() => setConfirmEnd(false)} className="icon-btn" aria-label="Cancel">
-                <X size={18} />
-              </button>
+              {confirmEnd && (
+                <div
+                  role="alertdialog"
+                  aria-labelledby="end-title"
+                  aria-describedby="end-body"
+                  className="fixed inset-x-4 bottom-4 z-30 rounded-[32px] border-2 border-vast bg-cream p-5 text-vast shadow-xl md:absolute md:inset-x-auto md:bottom-auto md:right-0 md:top-full md:mt-2 md:w-[22rem]"
+                >
+                  <h2 id="end-title" className="font-serif text-xl">End the interview?</h2>
+                  <p id="end-body" className="mt-1 text-sm text-vast/75">
+                    {hasAnswers
+                      ? `${remaining >= 1 ? `You still have ${formatClock(Math.round(remaining))} left. ` : ""}Aria will stop and your feedback report will be prepared from your answers${hasCanvas ? " and canvas" : ""}. You can't resume afterwards.`
+                      : "You haven't answered any questions yet, so there won't be a report."}
+                  </p>
+                  <div className="mt-4 flex justify-end gap-2">
+                    <button
+                      onClick={() => setConfirmEnd(false)}
+                      disabled={ending}
+                      autoFocus
+                      className="rounded-xl border-2 border-vast bg-cream px-3 py-2 text-sm font-bold disabled:opacity-50"
+                    >
+                      Keep interviewing
+                    </button>
+                    <button onClick={finish} disabled={ending} className="rounded-xl border-2 border-vast bg-ember px-3 py-2 text-sm font-bold">
+                      {ending ? "Saving…" : hasAnswers ? "End & get report" : "End anyway"}
+                    </button>
+                  </div>
+                </div>
+              )}
             </div>
-          ) : (
-            <button onClick={() => setConfirmEnd(true)} className="rounded-xl border-2 border-vast bg-vast px-3 py-2 text-sm font-bold text-cream" aria-label="End interview">
-              <span className="sm:hidden">End</span>
-              <span className="hidden sm:inline">End interview</span>
-            </button>
           )}
         </div>
       </header>
-      {confirmEnd && !hasAnswers && (
-        <p className="text-right text-sm text-red-700">You haven&apos;t answered any questions yet, so there won&apos;t be a report.</p>
-      )}
 
       {/* Mobile tab switcher when a canvas is open; on the canvas tab the status stays visible. */}
       {hasCanvas && (
@@ -791,59 +916,97 @@ function InterviewRoom() {
 
       {/* Lobby */}
       {!started && (
-        <div className="absolute inset-0 z-20 flex items-center justify-center bg-vast/70 p-4 backdrop-blur-sm">
-          <div className="w-full max-w-md rounded-[32px] border-2 border-vast bg-cream p-8 text-vast">
-            <h2 className="mb-2 font-serif text-3xl">{resuming ? "Welcome back" : `Ready, ${session.candidate_name.split(" ")[0]}?`}</h2>
-            <p className="mb-5 text-vast/75">
-              {resuming
-                ? "Pick up where you left off. Aria remembers the conversation so far."
-                : `A ${session.duration_minutes}-minute ${session.interview_type} interview for ${session.target_role}. Aria speaks first; answer out loud when it's your turn.`}
-            </p>
-            <ul className="mb-5 space-y-2 text-sm">
-              <li>🎧 Headphones give the best experience (no echo).</li>
-              <li>⏸️ Take your time: pausing to think won&apos;t end your answer.</li>
-              <li>✋ Talk over Aria (or press Space) to interrupt.</li>
-              {session.canvas_enabled && <li>💻 A canvas opens later for a hands-on exercise.</li>}
-            </ul>
-            {voiceUnavailable ? (
-              <p className="mb-4 rounded-2xl border-2 border-vast bg-ember/30 px-3 py-2 text-sm" data-testid="voice-unavailable-lobby">
-                Voice answers aren&apos;t available on this server right now, so you&apos;ll type your answers.
+        <div className="fixed inset-0 z-20 overflow-y-auto bg-vast/70 p-4 backdrop-blur-sm">
+          <div className="flex min-h-full items-center justify-center">
+            <div className="w-full max-w-md rounded-[32px] border-2 border-vast bg-cream p-6 text-vast sm:p-8">
+              <h2 className="mb-2 font-serif text-2xl sm:text-3xl">{resuming ? "Welcome back" : `Ready, ${session.candidate_name.split(" ")[0]}?`}</h2>
+              <p className="mb-5 text-vast/75">
+                {resuming
+                  ? "Pick up where you left off. Aria remembers the conversation so far."
+                  : `A ${session.duration_minutes}-minute ${session.interview_type} interview for ${session.target_role}. Aria speaks first; answer out loud when it's your turn.`}
               </p>
-            ) : (
-              !vad.errored && (
-                <MicCheck
-                  listening={vad.listening}
-                  heard={micHeard}
-                  levelRef={micLevel}
-                  deviceId={vad.deviceId}
-                  onSelectDevice={vad.selectDevice}
-                  onCheck={() => void checkMic()}
-                  checking={micChecking}
-                  disabled={vad.loading}
-                />
-              )
-            )}
-            {!started && micError && <p className="mb-3 text-sm text-red-700" data-testid="lobby-mic-error">{micError}</p>}
-            <button onClick={() => begin(true)} disabled={vad.loading && !vad.errored} className="btn-primary w-full disabled:opacity-60" data-testid="start">
-              {vad.loading && !vad.errored ? "Preparing microphone…" : resuming ? "Resume interview" : "Start interview"}
-            </button>
-            {vad.errored && (
-              <p className="mt-3 text-sm text-red-700">
-                Voice detection couldn&apos;t load on this device. You can still type your answers.
-                {debug && <span className="block font-mono text-xs">{String(vad.errored)}</span>}
-              </p>
-            )}
-            <button onClick={() => begin(false)} className="mt-3 w-full text-sm font-semibold underline underline-offset-4" data-testid="start-text">
-              Continue without a microphone
-            </button>
-            <label className="mt-4 flex items-center justify-center gap-2 text-xs text-vast/70">
-              <input type="checkbox" checked={allowInterrupt} onChange={(e) => setAllowInterrupt(e.target.checked)} />
-              Let me interrupt by speaking (turn off if you use speakers and get cut off)
-            </label>
-            <label className="mt-2 flex items-center justify-center gap-2 text-xs text-vast/70">
-              <input type="checkbox" checked={captureMode === "push"} onChange={(e) => setCaptureMode(e.target.checked ? "push" : "auto")} data-testid="lobby-push-to-talk" />
-              Noisy room or other voices nearby: use push-to-talk (hold Space while you answer)
-            </label>
+              <ul className="mb-5 space-y-2 text-sm">
+                <li className="flex items-start gap-2.5">
+                  <Headphones size={16} className="mt-0.5 shrink-0 text-forest" aria-hidden />
+                  <span>Headphones give the best experience (no echo).</span>
+                </li>
+                <li className="flex items-start gap-2.5">
+                  <Pause size={16} className="mt-0.5 shrink-0 text-forest" aria-hidden />
+                  <span>Take your time: pausing to think won&apos;t end your answer.</span>
+                </li>
+                <li className="flex items-start gap-2.5">
+                  <Hand size={16} className="mt-0.5 shrink-0 text-forest" aria-hidden />
+                  <span>{coarse ? "Talk over Aria (or tap Interrupt) to stop her." : "Talk over Aria (or press Space) to interrupt."}</span>
+                </li>
+                {session.canvas_enabled && (
+                  <li className="flex items-start gap-2.5">
+                    <Code2 size={16} className="mt-0.5 shrink-0 text-forest" aria-hidden />
+                    <span>A canvas opens later for a hands-on exercise.</span>
+                  </li>
+                )}
+              </ul>
+              {voiceUnavailable ? (
+                <p className="mb-4 rounded-2xl border-2 border-vast bg-ember/30 px-3 py-2 text-sm" data-testid="voice-unavailable-lobby">
+                  Voice answers aren&apos;t available on this server right now, so you&apos;ll type your answers.
+                </p>
+              ) : (
+                !vad.errored && (
+                  <MicCheck
+                    listening={vad.listening}
+                    heard={micHeard}
+                    levelRef={micLevel}
+                    deviceId={vad.deviceId}
+                    onSelectDevice={vad.selectDevice}
+                    onCheck={() => void checkMic()}
+                    checking={micChecking}
+                    disabled={vad.loading}
+                  />
+                )
+              )}
+              {!started && micError && <p className="mb-3 text-sm text-red-700" data-testid="lobby-mic-error">{micError}</p>}
+              <fieldset className="mb-4 space-y-2 rounded-2xl border-2 border-vast/15 p-3">
+                <legend className="px-1 text-xs font-bold uppercase tracking-wider text-vast/60">Audio settings</legend>
+                <label className="flex items-start gap-2 text-sm text-vast/80">
+                  <input
+                    type="checkbox"
+                    checked={allowInterrupt}
+                    onChange={(e) => setAllowInterrupt(e.target.checked)}
+                    className="mt-0.5 h-4 w-4 shrink-0 accent-forest"
+                  />
+                  <span>
+                    Interrupt Aria by speaking
+                    <span className="block text-xs text-vast/60">Turn off if you use speakers and get cut off</span>
+                  </span>
+                </label>
+                <label className="flex items-start gap-2 text-sm text-vast/80">
+                  <input
+                    type="checkbox"
+                    checked={captureMode === "push"}
+                    onChange={(e) => setCaptureMode(e.target.checked ? "push" : "auto")}
+                    className="mt-0.5 h-4 w-4 shrink-0 accent-forest"
+                    data-testid="lobby-push-to-talk"
+                  />
+                  <span>
+                    Push-to-talk
+                    <span className="block text-xs text-vast/60">
+                      {coarse ? "For noisy rooms: hold the button while you answer" : "For noisy rooms: hold Space or the button while you answer"}
+                    </span>
+                  </span>
+                </label>
+              </fieldset>
+              <button onClick={() => begin(true)} disabled={vad.loading && !vad.errored} className="btn-primary w-full disabled:opacity-60" data-testid="start">
+                {vad.loading && !vad.errored ? "Preparing microphone…" : resuming ? "Resume interview" : "Start interview"}
+              </button>
+              {vad.errored && (
+                <p className="mt-3 text-sm text-red-700">
+                  Voice detection couldn&apos;t load on this device. You can still type your answers.
+                  {debug && <span className="block font-mono text-xs">{String(vad.errored)}</span>}
+                </p>
+              )}
+              <button onClick={() => begin(false)} className="mt-3 w-full text-sm font-semibold underline underline-offset-4" data-testid="start-text">
+                Continue without a microphone
+              </button>
+            </div>
           </div>
         </div>
       )}
@@ -868,17 +1031,21 @@ function MicMeter({ levelRef, active }: { levelRef: MutableRefObject<number>; ac
     return () => cancelAnimationFrame(frame);
   }, [levelRef]);
   return (
-    <div className={cn("flex h-7 items-end gap-0.5 rounded-full border-2 border-vast bg-cream px-3 py-1", !active && "opacity-50")} aria-label="Microphone level">
-      {Array.from({ length: 8 }, (_, i) => (
-        <span
-          key={i}
-          ref={(el) => {
-            bars.current[i] = el;
-          }}
-          className="w-1 rounded-full bg-forest transition-opacity duration-75"
-          style={{ height: `${30 + i * 9}%`, opacity: 0.25 }}
-        />
-      ))}
+    <div className={cn("flex h-8 items-center gap-1.5 rounded-full border-2 border-vast bg-cream px-3", !active && "opacity-50")} aria-label="Microphone level">
+      <Mic size={14} className="text-vast" aria-hidden />
+      <span className="text-xs font-bold text-vast">Mic on</span>
+      <div className="flex h-4 items-end gap-0.5" aria-hidden>
+        {Array.from({ length: 8 }, (_, i) => (
+          <span
+            key={i}
+            ref={(el) => {
+              bars.current[i] = el;
+            }}
+            className="w-1 rounded-full bg-forest transition-opacity duration-75"
+            style={{ height: `${30 + i * 9}%`, opacity: 0.25 }}
+          />
+        ))}
+      </div>
     </div>
   );
 }
