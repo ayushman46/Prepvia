@@ -770,7 +770,7 @@ function InterviewRoom() {
                   }}
                   maxLength={LIMITS.answerChars}
                   rows={2}
-                  placeholder={turnStatus === "processing" ? "Wait for the interviewer…" : "Type your answer and press Enter…"}
+                  placeholder={turnStatus === "processing" ? "Aria is thinking it over…" : "Type your answer and press Enter…"}
                   className="max-h-40 min-h-[3.25rem] flex-1 resize-none overflow-y-auto rounded-2xl border-2 border-vast bg-cream px-4 py-3 text-vast outline-none [field-sizing:content] focus:bg-white"
                 />
                 <button
@@ -860,8 +860,8 @@ function InterviewRoom() {
                   <h2 id="end-title" className="font-serif text-xl">End the interview?</h2>
                   <p id="end-body" className="mt-1 text-sm text-vast/75">
                     {hasAnswers
-                      ? `${remaining >= 1 ? `You still have ${formatClock(Math.round(remaining))} left. ` : ""}Aria will stop and your feedback report will be prepared from your answers${hasCanvas ? " and canvas" : ""}. You can't resume afterwards.`
-                      : "You haven't answered any questions yet, so there won't be a report."}
+                      ? `${remaining >= 1 ? `You still have ${formatClock(Math.round(remaining))} left. ` : ""}Aria will wrap up and build your scorecard from your answers${hasCanvas ? " and canvas" : ""}. You can't resume afterwards.`
+                      : "You haven't answered anything yet, so there won't be a scorecard."}
                   </p>
                   <div className="mt-4 flex justify-end gap-2">
                     <button

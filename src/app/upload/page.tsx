@@ -158,7 +158,7 @@ export default function UploadPage() {
         )}
 
         <button onClick={skip} disabled={isUploading} className="mt-6 text-sm font-semibold underline underline-offset-4 disabled:opacity-50">
-          {existing ? "Continue without a resume (removes it)" : "Continue without a resume"}
+          {existing ? "Skip the resume (removes the current one)" : "Skip for now, practice without a resume"}
         </button>
         <p className="mt-6 text-sm text-vast/70">
           Your resume only shapes your practice questions. See our <Link href="/#privacy" className="underline">privacy notes</Link>.

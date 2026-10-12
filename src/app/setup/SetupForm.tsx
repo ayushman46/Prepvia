@@ -93,7 +93,7 @@ export default function SetupForm() {
             </>
           ) : (
             <>
-              <span className="text-vast/70">No resume attached</span>
+              <span className="text-vast/70">No resume attached. Questions stay role-based.</span>
               <Link href="/upload" className="shrink-0 font-semibold underline underline-offset-4">
                 Add resume
               </Link>
