@@ -15,14 +15,9 @@ export function GeneratingScreen({ elapsedMs, retrying }: { elapsedMs: number; r
   const step = generationStep(elapsedMs);
   return (
     <Screen>
-      <div
-        className="mx-auto mb-6 h-12 w-12 animate-spin rounded-full border-4 border-vast/15 border-t-forest"
-        aria-hidden
-      />
       <h1 className="font-serif text-3xl md:text-4xl">Generating your report</h1>
       <div role="status" aria-live="polite" aria-atomic="true">
-        <p className="mt-3 text-lg font-semibold">{GENERATION_STEPS[step]}</p>
-        <p className="mt-1 text-vast/75">{generationDetail(elapsedMs, retrying)}</p>
+        <p className="mt-3 text-vast/75">{generationDetail(elapsedMs, retrying)}</p>
       </div>
       <ol className="mx-auto mt-8 max-w-xs space-y-3 text-left" aria-label="Progress">
         {GENERATION_STEPS.map((label, i) => (
@@ -44,7 +39,7 @@ export function GeneratingScreen({ elapsedMs, retrying }: { elapsedMs: number; r
         ))}
       </ol>
       <div className="mt-8 h-2 overflow-hidden rounded-full bg-stone" aria-hidden>
-        <div className="h-full rounded-full bg-forest transition-[width] duration-1000" style={{ width: `${estimatedProgress(elapsedMs)}%` }} />
+        <div className="h-full rounded-full bg-forest transition-[width] duration-1000" style={{ width: `${Math.max(6, estimatedProgress(elapsedMs))}%` }} />
       </div>
     </Screen>
   );
