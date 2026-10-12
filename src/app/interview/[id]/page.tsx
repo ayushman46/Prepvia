@@ -485,10 +485,10 @@ function InterviewRoom() {
 
   // ------------------------------------------------------------------ states
 
-  if (interview.loadState === "loading") return <FullScreenMessage title="Preparing your interview room…" />;
+  if (interview.loadState === "loading") return <FullScreenMessage title="Setting up your interview room…" />;
   if (interview.loadState === "not_found") {
     return (
-      <FullScreenMessage title="Interview not found" body="This link is invalid or the interview has expired.">
+      <FullScreenMessage title="Interview not found" body="This link is broken or the interview has expired. Start a fresh one in under a minute.">
         <Link href="/upload" className="btn-primary">Start a new interview</Link>
       </FullScreenMessage>
     );
@@ -504,7 +504,7 @@ function InterviewRoom() {
     return (
       <FullScreenMessage
         title="This interview has ended"
-        body={session.transcript.some((m) => m.role === "user") ? "Your feedback report is ready to view." : "No questions were answered, so there is no report to show."}
+        body={session.transcript.some((m) => m.role === "user") ? "Your scorecard is ready, with evidence from your own answers." : "No answers were recorded, so there’s nothing to score yet."}
       >
         {session.transcript.some((m) => m.role === "user") ? (
           <Link href={`/report/${sessionId}`} className="btn-primary">View report</Link>
@@ -591,10 +591,10 @@ function InterviewRoom() {
   const StatusIcon = { aria: Volume2, you: micLive ? Mic : Keyboard, busy: Loader2, done: Check, off: MicOff }[statusTone];
 
   const captureIssueText: Record<string, string> = {
-    ended: "Your microphone stopped. It may have been disconnected.",
+    ended: "Your microphone stopped. It may have been unplugged or disconnected.",
     muted: "Your microphone is muted by the system or another app.",
-    silent: "No sound is coming from your microphone. Check it isn't muted or set to the wrong device.",
-    stalled: "The microphone paused.",
+    silent: "No sound from your microphone. Check it isn't muted or set to the wrong input.",
+    stalled: "The microphone paused for a moment.",
   };
 
   const stage = (
@@ -671,7 +671,7 @@ function InterviewRoom() {
           </p>
         ) : started && !limitReached && noisyRoom && captureMode === "auto" && micLive ? (
           <div className="flex w-full max-w-2xl flex-wrap items-center justify-center gap-2 rounded-2xl border-2 border-lavender px-4 py-2 text-sm" data-testid="noisy-hint">
-            <span>There&apos;s a lot of background sound. Push-to-talk works better in noisy rooms.</span>
+            <span>It&apos;s noisy where you are. Push-to-talk will keep stray sounds out of your answers.</span>
             <button
               onClick={(e) => {
                 e.currentTarget.blur();
@@ -938,17 +938,17 @@ function InterviewRoom() {
               <h2 className="mb-2 font-serif text-2xl sm:text-3xl">{resuming ? "Welcome back" : `Ready, ${session.candidate_name.split(" ")[0]}?`}</h2>
               <p className="mb-5 text-vast/75">
                 {resuming
-                  ? "Pick up where you left off. Aria remembers the conversation so far."
-                  : `A ${session.duration_minutes}-minute ${session.interview_type} interview for ${session.target_role}. Aria speaks first; answer out loud when it's your turn.`}
+                  ? "Pick up mid-conversation. Aria remembers everything you’ve said so far."
+                  : `A ${session.duration_minutes}-minute ${session.interview_type} interview for ${session.target_role}. Aria opens; answer out loud, just like the real thing.`}
               </p>
               <ul className="mb-5 space-y-2 text-sm">
                 <li className="flex items-start gap-2.5">
                   <Headphones size={16} className="mt-0.5 shrink-0 text-forest" aria-hidden />
-                  <span>Headphones give the best experience (no echo).</span>
+                  <span>Headphones keep Aria from hearing herself (no echo).</span>
                 </li>
                 <li className="flex items-start gap-2.5">
                   <Pause size={16} className="mt-0.5 shrink-0 text-forest" aria-hidden />
-                  <span>Take your time: pausing to think won&apos;t end your answer.</span>
+                  <span>Think out loud. A pause to collect yourself won&apos;t cut you off.</span>
                 </li>
                 <li className="flex items-start gap-2.5">
                   <Hand size={16} className="mt-0.5 shrink-0 text-forest" aria-hidden />
@@ -957,7 +957,7 @@ function InterviewRoom() {
                 {session.canvas_enabled && (
                   <li className="flex items-start gap-2.5">
                     <Code2 size={16} className="mt-0.5 shrink-0 text-forest" aria-hidden />
-                    <span>A canvas opens later for a hands-on exercise.</span>
+                    <span>Later, a canvas opens for a hands-on exercise.</span>
                   </li>
                 )}
               </ul>
@@ -991,7 +991,7 @@ function InterviewRoom() {
                   />
                   <span>
                     Interrupt Aria by speaking
-                    <span className="block text-xs text-vast/60">Turn off if you use speakers and get cut off</span>
+                    <span className="block text-xs text-vast/60">Turn off if you’re on speakers and Aria keeps cutting you off</span>
                   </span>
                 </label>
                 <label className="flex items-start gap-2 text-sm text-vast/80">
@@ -1011,7 +1011,7 @@ function InterviewRoom() {
                 </label>
               </fieldset>
               <button onClick={() => begin(true)} disabled={vad.loading && !vad.errored} className="btn-primary w-full disabled:opacity-60" data-testid="start">
-                {vad.loading && !vad.errored ? "Preparing microphone…" : resuming ? "Resume interview" : "Start interview"}
+                {vad.loading && !vad.errored ? "Warming up the microphone…" : resuming ? "Resume interview" : "Start interview"}
               </button>
               {vad.errored && (
                 <p className="mt-3 text-sm text-red-700">
@@ -1096,7 +1096,7 @@ function FullScreenMessage({ title, body, children }: { title: string; body?: st
 export default function InterviewRoomPage() {
   // useSearchParams requires a Suspense boundary for static rendering.
   return (
-    <Suspense fallback={<FullScreenMessage title="Preparing your interview room…" />}>
+    <Suspense fallback={<FullScreenMessage title="Setting up your interview room…" />}>
       <InterviewRoom />
     </Suspense>
   );

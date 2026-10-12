@@ -56,7 +56,7 @@ export function MicCheck({ listening, heard, levelRef, deviceId, onSelectDevice,
         className="mb-4 flex w-full items-center justify-center gap-2 rounded-2xl border-2 border-vast bg-cream px-4 py-2.5 text-sm font-bold disabled:opacity-60"
         data-testid="mic-check"
       >
-        <Mic size={16} /> {checking ? "Waiting for microphone permission…" : "Check my microphone"}
+        <Mic size={16} /> {checking ? "Allow microphone access in your browser…" : "Check my microphone"}
       </button>
     );
   }
@@ -75,7 +75,7 @@ export function MicCheck({ listening, heard, levelRef, deviceId, onSelectDevice,
               <Check size={14} /> We can hear you
             </>
           ) : (
-            "Say a few words…"
+            "Say hello to test it…"
           )}
         </span>
       </div>

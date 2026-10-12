@@ -64,7 +64,7 @@ export function CanvasPanel({
                 <Loader2 size={12} className="animate-spin" /> Saving
               </>
             ) : canvas.unsaved ? (
-              <span className="font-semibold text-red-700">Not saved yet · retrying</span>
+              <span className="font-semibold text-red-700">Not saved yet · retrying…</span>
             ) : (
               <>
                 <Check size={12} /> Shared with interviewer
