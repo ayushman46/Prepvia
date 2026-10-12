@@ -172,6 +172,7 @@ function InterviewRoom() {
   const dismissNoisy = () => {
     noisyDismissedAt.current = performance.now();
     noiseEvents.current = [];
+    lostAttempts.current = [];
     setNoisyRoom(false);
   };
 
@@ -213,6 +214,7 @@ function InterviewRoom() {
         const transcript = speculationId !== null ? speculations.current.get(speculationId)?.promise : undefined;
         for (const [id, speculation] of speculations.current) if (id !== speculationId) speculation.controller.abort();
         speculations.current.clear();
+        lostAttempts.current = []; // they got through: start counting afresh
         const wav = encodeWav(audio);
         logVad("utterance", { seconds: +(audio.length / 16_000).toFixed(1), speculationId, turnStatus });
         // Cut Aria off just as she started replying? Then the candidate was still answering.
@@ -245,7 +247,7 @@ function InterviewRoom() {
         if (captureMode === "auto" && interview.amend(encodeWav(audio), endedAt)) return;
         if (turnStatus !== "processing") return; // while Aria speaks, talking over her is barge-in's job
         noteNoise();
-        hint("busy", "Aria is still thinking. Please repeat that once she has replied.", 10_000);
+        hint("busy", "Aria is still thinking — say that again once she's replied.", 10_000);
       },
       onSpeechActivity: (activity: SpeechActivity) => {
         logVad("activity", { activity, turnStatus });
