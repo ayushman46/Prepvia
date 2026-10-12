@@ -84,6 +84,11 @@ export type VadCallbacks = {
   /** An utterance was ignored as background noise ("quiet": speech-like but too faint). */
   onRejected?: (reason: "short" | "quiet") => void;
   /**
+   * The VAD heard speech-like sound that ended too soon to count (vad-web's misfire)
+   * while the candidate had the floor in hands-free mode.
+   */
+  onMisfire?: () => void;
+  /**
    * A real-sounding utterance ended while the candidate didn't have the floor
    * (e.g. they kept talking after their answer was sent). The audio is passed on so
    * it can still be added to the answer instead of being lost.
@@ -398,6 +403,14 @@ export function useVAD(callbacks: VadCallbacks, accepting: boolean, mode: Captur
     if (streamRef.current === stream) streamRef.current = null;
   }, []);
 
+  const handleMisfire = useCallback(() => {
+    // vad-web drops the audio; the tracker ended the same utterance on the same frame.
+    const verdict = trackerRef.current?.takeEnded() ?? null;
+    if (verdict?.speculationId != null) callbacksRef.current.onCancelSpeculation?.(verdict.speculationId);
+    if (submittingRef.current || modeRef.current === "push" || !acceptingRef.current) return;
+    callbacksRef.current.onMisfire?.();
+  }, []);
+
   const create = useCallback(
     () =>
       MicVAD.new({
@@ -423,8 +436,9 @@ export function useVAD(callbacks: VadCallbacks, accepting: boolean, mode: Captur
         },
         onFrameProcessed: (probabilities, frame) => handleFrame(probabilities.isSpeech, frame),
         onSpeechEnd: handleSpeechEnd,
+        onVADMisfire: handleMisfire,
       } satisfies Partial<RealTimeVADOptions>),
-    [acquireStream, releaseStream, handleFrame, handleSpeechEnd],
+    [acquireStream, releaseStream, handleFrame, handleSpeechEnd, handleMisfire],
   );
 
   // Load the model once. Under React StrictMode the effect runs twice; the first
