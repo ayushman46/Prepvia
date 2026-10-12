@@ -919,6 +919,7 @@ function InterviewRoom() {
         <div className="fixed inset-0 z-20 overflow-y-auto bg-vast/70 p-4 backdrop-blur-sm">
           <div className="flex min-h-full items-center justify-center">
             <div className="w-full max-w-md rounded-[32px] border-2 border-vast bg-cream p-6 text-vast sm:p-8">
+              {!resuming && <p className="mb-1 text-xs font-bold uppercase tracking-widest text-forest">Step 3 of 3 · Mic check</p>}
               <h2 className="mb-2 font-serif text-2xl sm:text-3xl">{resuming ? "Welcome back" : `Ready, ${session.candidate_name.split(" ")[0]}?`}</h2>
               <p className="mb-5 text-vast/75">
                 {resuming
