@@ -5,7 +5,7 @@
  * Production build, fake LLM/STT providers (fast, deterministic), real Edge TTS,
  * real MongoDB (throwaway database), programmable fake microphone.
  *
- *   npm run build && node tests/live-browser/screens.mjs [--out=test-results/screens]
+ *   npm run build && node tests/live-browser/screens.mjs [--out=test-results/screens] [--devices=desktop,phone] [--port=3320]
  */
 import { spawn } from "node:child_process";
 import { existsSync, mkdirSync, readFileSync } from "node:fs";
@@ -18,8 +18,8 @@ import { chromium } from "playwright";
 
 const root = join(dirname(fileURLToPath(import.meta.url)), "..", "..");
 const args = new Map(process.argv.slice(2).map((a) => a.replace(/^--/, "").split("=")).map(([k, v]) => [k, v ?? "true"]));
-const APP_PORT = 3320;
-const FAKE_PORT = 4040;
+const APP_PORT = Number(args.get("port") || 3320);
+const FAKE_PORT = Number(args.get("fake-port") || APP_PORT + 720);
 const BASE = `http://localhost:${APP_PORT}`;
 const FAKE = `http://127.0.0.1:${FAKE_PORT}`;
 const OUT = join(root, args.get("out") || "test-results/screens");
