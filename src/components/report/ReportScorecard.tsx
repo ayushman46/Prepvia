@@ -201,7 +201,7 @@ function Header({ report, session }: { report: ReadyReport; session: SessionView
               <CitedText text={report.summary} />
             </p>
           ) : (
-            <p className="mt-5 text-vast/75">No overall summary was produced for this interview.</p>
+            <p className="mt-5 text-vast/75">We couldn't write an overall summary for this one, but the scores and feedback below still apply.</p>
           )}
           {meta?.limited_evidence && (
             <p className="mt-5 flex items-start gap-3 rounded-2xl border-2 border-ember bg-ember/15 p-4 text-left text-sm leading-relaxed">
@@ -209,13 +209,13 @@ function Header({ report, session }: { report: ReadyReport; session: SessionView
               <span>
                 <span className="font-bold">Limited evidence. </span>
                 This report is based on {meta.substantive_answers} substantive answer{meta.substantive_answers === 1 ? "" : "s"}, so scores
-                are provisional and capped. A longer interview gives a more reliable read.
+                are provisional and capped. Answer a few more questions next time for a fuller, more reliable read.
               </span>
             </p>
           )}
           <div className="mt-6 flex flex-wrap justify-center gap-3 md:justify-start print:hidden">
             <Link href="/upload" className="btn-primary">
-              Practice again
+              Practice another round
             </Link>
             <button type="button" onClick={() => window.print()} className="btn-secondary">
               <Printer size={18} aria-hidden /> Save as PDF
@@ -244,13 +244,13 @@ function StrengthsAndImprovements({ report }: { report: ReadyReport }) {
               </li>
             ))
           ) : (
-            <li className="text-vast/75">No specific strengths were identified in this session.</li>
+            <li className="text-vast/75">No standout strengths were flagged this time. Longer, more detailed answers give the reviewer more to recognize.</li>
           )}
         </ul>
       </section>
       <section className="card min-w-0 p-6 md:p-10" aria-labelledby="improvements-heading">
         <h2 id="improvements-heading" className="mb-6 flex items-center gap-3 font-serif text-2xl">
-          <span className="h-4 w-4 rounded-full border-2 border-vast bg-ember" aria-hidden /> Areas to improve
+          <span className="h-4 w-4 rounded-full border-2 border-vast bg-ember" aria-hidden /> What to work on next
         </h2>
         <ul className="space-y-4">
           {report.improvements.length ? (
@@ -260,7 +260,7 @@ function StrengthsAndImprovements({ report }: { report: ReadyReport }) {
               </li>
             ))
           ) : (
-            <li className="text-vast/75">No specific improvements were identified in this session.</li>
+            <li className="text-vast/75">No specific improvements were flagged this time. Keep practicing to stay sharp.</li>
           )}
         </ul>
       </section>
@@ -311,7 +311,7 @@ function CompetencyCard({ competency, index }: { competency: CompetencyScore; in
           <CitedText text={competency.rationale} />
         </p>
       ) : (
-        <p className="mb-3 text-sm text-vast/75">No rationale was given for this score.</p>
+        <p className="mb-3 text-sm text-vast/75">The reviewer didn't explain this score.</p>
       )}
       {competency.evidence.length > 0 && (
         <div className="mb-3">
@@ -327,8 +327,8 @@ function CompetencyCard({ competency, index }: { competency: CompetencyScore; in
       )}
       {(competency.positive_signals.length > 0 || competency.negative_signals.length > 0) && (
         <div className="grid gap-3 sm:grid-cols-2">
-          <SignalList title="Positive signals" items={competency.positive_signals} positive />
-          <SignalList title="Concerns" items={competency.negative_signals} positive={false} />
+          <SignalList title="What stood out" items={competency.positive_signals} positive />
+          <SignalList title="What held it back" items={competency.negative_signals} positive={false} />
         </div>
       )}
     </article>
@@ -359,11 +359,11 @@ function OverviewRow({ href, name, score, className }: { href: string; name: str
 function Scorecard({ competencies, handsOn }: { competencies: CompetencyScore[]; handsOn: ReadyReport["hands_on"] }) {
   return (
     <section className="card mb-8 p-6 md:p-10" aria-labelledby="scorecard-heading" data-testid="scorecard">
-      <SectionHeading id="scorecard-heading" note="1 = major gaps · 3 = meets the bar for your level · 5 = exceptional">
+      <SectionHeading id="scorecard-heading" note="1 = major gaps · 3 = meets the bar for your level · 5 = exceptional. Every score cites your own words.">
         Scorecard
       </SectionHeading>
       {competencies.length === 0 ? (
-        <p className="text-vast/75">No competencies could be scored from this interview.</p>
+        <p className="text-vast/75">There wasn't enough in this interview to score any competency. A few fuller answers next time will fill this in.</p>
       ) : (
         <>
           <ul className="mb-8 space-y-3 break-inside-avoid" aria-label="Competency overview">
@@ -409,7 +409,7 @@ function HandsOn({ report, session }: { report: ReadyReport; session: SessionVie
       {report.meta?.hands_on_work_submitted === false && (
         <p className="mb-4 flex items-start gap-3 rounded-2xl border-2 border-ember bg-ember/15 p-4 text-sm">
           <TriangleAlert size={18} className="mt-0.5 shrink-0 text-[#9a5b00]" aria-hidden />
-          <span>No canvas work was submitted: the editor still held only the starter code, so the rating reflects your reasoning alone.</span>
+          <span>No canvas work was submitted (the editor still held only the starter code), so this rating reflects your spoken reasoning alone.</span>
         </p>
       )}
       <p className="mb-5 break-words text-lg leading-relaxed">
@@ -427,11 +427,11 @@ function HandsOn({ report, session }: { report: ReadyReport; session: SessionVie
               ))}
             </ul>
           ) : (
-            <p className="text-sm text-vast/75">Nothing specific was noted.</p>
+            <p className="text-sm text-vast/75">Nothing specific was called out.</p>
           )}
         </div>
         <div className="min-w-0">
-          <h3 className="mb-2 font-bold">Gaps</h3>
+          <h3 className="mb-2 font-bold">What to tighten</h3>
           {handsOn.gaps.length ? (
             <ul className="list-disc space-y-1 pl-5">
               {handsOn.gaps.map((item, i) => (
@@ -441,7 +441,7 @@ function HandsOn({ report, session }: { report: ReadyReport; session: SessionVie
               ))}
             </ul>
           ) : (
-            <p className="text-sm text-vast/75">No specific gaps were listed.</p>
+            <p className="text-sm text-vast/75">No specific gaps were called out.</p>
           )}
         </div>
       </div>
@@ -536,7 +536,7 @@ function Questions({ items }: { items: QuestionFeedback[] }) {
   if (items.length === 0) return null;
   return (
     <section className="card mb-8 p-6 md:p-10" aria-labelledby="questions-heading">
-      <SectionHeading id="questions-heading" note="Each answer is rated on the same 1-5 rubric. Summaries are paraphrases; the transcript has your exact words.">
+      <SectionHeading id="questions-heading" note="Every answer is rated on the same 1–5 rubric. Summaries are paraphrased; the transcript below has your exact words.">
         Question by question
       </SectionHeading>
       <ol className="space-y-4">
@@ -553,7 +553,7 @@ function Integrity({ report }: { report: ReadyReport }) {
   if (notes.length === 0) {
     return (
       <p className="mb-8 flex items-center justify-center gap-2 text-sm text-vast/70">
-        <ShieldCheck size={16} aria-hidden /> No integrity concerns were recorded in this session.
+        <ShieldCheck size={16} aria-hidden /> Clean session: no integrity concerns were recorded.
       </p>
     );
   }
@@ -567,7 +567,7 @@ function Integrity({ report }: { report: ReadyReport }) {
           </li>
         ))}
       </ul>
-      <p className="mt-2 text-sm text-vast/70">In a real interview, staying in the interview tab and typing your own work avoids integrity flags.</p>
+      <p className="mt-2 text-sm text-vast/70">In a real interview, staying in the interview tab and writing your own work keeps your session free of flags.</p>
     </section>
   );
 }
