@@ -123,6 +123,55 @@ describe("UtteranceTracker noise gate", () => {
     expect(distant.takeEnded()).toMatchObject({ accepted: false });
   });
 
+  describe("adversarial sounds against the near-voice gate (production settings)", () => {
+    const PROD = { ...GATE, shortWord: { minRun: 5, minSnrDb: 18 }, nearVoice: { minProbability: 0.4, minSnrDb: 18 } };
+    const OLD = { ...GATE, shortWord: { minRun: 5, minSnrDb: 18 } };
+    /** Run the same sound through the old and the near-voice gate in a quiet room (RMS 0.002). */
+    const both = (sound: (t: UtteranceTracker) => void) =>
+      [OLD, PROD].map((gate) => {
+        const { tracker } = makeTracker({ gate, positiveThreshold: 0.4, negativeThreshold: 0.3 });
+        feedAt(tracker, 0.02, 0.002, 60);
+        sound(tracker);
+        feedAt(tracker, 0.02, 0.002, 30);
+        return tracker.takeEnded()?.accepted ?? false;
+      });
+
+    it("rejects keyboard typing (short loud bursts, p 0.0-0.5)", () => {
+      const ps = [0.1, 0.45, 0.0, 0.5, 0.3, 0.48, 0.2, 0.42, 0.05, 0.5, 0.35, 0.47];
+      expect(both((t) => { for (const p of ps) { feedAt(t, Math.max(p, 0.41), 0.15, 1); feedAt(t, 0.32, 0.003, 1); } })).toEqual([false, false]);
+    });
+    it("rejects breathing and sighs (moderately loud, low p)", () => {
+      expect(both((t) => { feedAt(t, 0.42, 0.01, 4); feedAt(t, 0.25, 0.03, 15); feedAt(t, 0.42, 0.01, 4); })).toEqual([false, false]);
+    });
+    it("rejects a cough (loud, p spikes to 0.6 for 2-3 frames)", () => {
+      expect(both((t) => { feedAt(t, 0.3, 0.3, 1); feedAt(t, 0.6, 0.4, 3); feedAt(t, 0.45, 0.2, 1); feedAt(t, 0.2, 0.05, 3); })).toEqual([false, false]);
+    });
+    it("rejects music or TV across the room (speech-like but barely above the floor)", () => {
+      expect(both((t) => { for (let i = 0; i < 60; i++) feedAt(t, [0.5, 0.7, 0.85, 0.6][i % 4], 0.012, 1); })).toEqual([false, false]);
+    });
+    it("rejects a sustained loud non-voice sound Silero is unsure about (fan gust, chair scrape)", () => {
+      const [old, now] = both((t) => feedAt(t, 0.45, 0.1, 14));
+      expect(old).toBe(false);
+      expect(now).toBe(false);
+    });
+    it("rejects a short loud thud through the one-word path, but still accepts a crisp close \"No.\"", () => {
+      expect(both((t) => feedAt(t, 0.45, 0.2, 6))).toEqual([false, false]);
+      expect(both((t) => { feedAt(t, 0.5, 0.15, 1); feedAt(t, 0.85, 0.2, 5); feedAt(t, 0.5, 0.1, 1); })).toEqual([true, true]);
+    });
+    it("rejects a cough-and-throat-clear burst (loud, a few frames above 0.6, but no run)", () => {
+      expect(both((t) => { for (let i = 0; i < 4; i++) { feedAt(t, 0.65, 0.3, 2); feedAt(t, 0.2, 0.01, 3); } })).toEqual([false, false]);
+    });
+    it("trade-off: a loud voice that never reaches p 0.6 is rejected; three frames at 0.6 are enough", () => {
+      const flat = [0.45, 0.55, 0.5, 0.58, 0.48, 0.52];
+      expect(both((t) => { for (let r = 0; r < 4; r++) for (const p of flat) feedAt(t, p, 0.2, 1); })[1]).toBe(false);
+      const lifted = [...flat.slice(0, 3), 0.6, 0.62, 0.6, ...flat];
+      expect(both((t) => { for (const p of lifted) feedAt(t, p, 0.2, 1); })[1]).toBe(true);
+    });
+    it("still accepts a close second person (indistinguishable from the candidate by level)", () => {
+      expect(both((t) => feedAt(t, 0.9, 0.1, 15))).toEqual([true, true]);
+    });
+  });
+
   it("rejects speech-like sound that is barely above the room noise (distant voices)", () => {
     const { tracker, onSpeculate } = makeTracker({ gate: GATE, speculateAfterMs: 350 });
     feedAt(tracker, 0.05, 0.01, 60); // room at RMS 0.01
