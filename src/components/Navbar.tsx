@@ -44,7 +44,7 @@ export function Navbar() {
               href="/upload"
               className="flex h-10 items-center rounded-[14px] border-2 border-vast bg-lavender px-4 text-sm font-bold text-vast transition-transform hover:-translate-y-0.5 md:h-[44px] md:px-6"
             >
-              Start practicing
+              Practice free
             </Link>
           </>
         )}

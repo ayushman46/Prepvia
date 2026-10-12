@@ -11,14 +11,14 @@ const siteUrl = process.env.NEXT_PUBLIC_SITE_URL || (process.env.VERCEL_URL ? `h
 export const metadata: Metadata = {
   metadataBase: new URL(siteUrl),
   title: {
-    default: "InterviewAI — Voice mock interviews that talk back",
+    default: "InterviewAI — Rehearse the interview before it counts",
     template: "%s · InterviewAI",
   },
   description:
-    "Free voice-first AI mock interviews grounded in your resume and the job description, with adaptive follow-ups and evidence-based feedback.",
+    "Free voice mock interviews grounded in your resume and the job description. Answer out loud, get follow-ups that adapt, and review a scorecard that cites your own answers.",
   openGraph: {
-    title: "InterviewAI — Voice mock interviews that talk back",
-    description: "Practice out loud with an AI interviewer that adapts to your answers and shows you what to improve.",
+    title: "InterviewAI — Rehearse the interview before it counts",
+    description: "Answer out loud to an interviewer who has read your resume, then see where each answer landed and what to tighten.",
     type: "website",
   },
   robots: { index: true, follow: true },
