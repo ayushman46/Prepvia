@@ -147,7 +147,8 @@ function ctx(overrides: Partial<Parameters<typeof finalizeReport>[2]> = {}): Par
     integrity: summarizeIntegrity([]),
     exerciseHappened: false,
     workSubmitted: null,
-    facts: interviewFacts({}, TRANSCRIPT),
+    // Enough evidence by default; the thin-evidence cases override this.
+    facts: { ...interviewFacts({}, TRANSCRIPT), substantive: 3, thinEvidence: false, limitedEvidence: false },
     index: evidenceIndex(TRANSCRIPT, ""),
     ...overrides,
   };
@@ -174,16 +175,16 @@ describe("score normalization", () => {
     expect(competencyBasedScore([null])).toBeNull();
   });
 
-  it("ties the overall score to within 8 points of the competency score", () => {
-    expect(normalizeOverallScore(90, [3, 4])).toBe(71);
-    expect(normalizeOverallScore(30, [3, 4])).toBe(55);
+  it("ties the overall score to within 4 points of the competency score", () => {
+    expect(normalizeOverallScore(90, [3, 4])).toBe(67);
+    expect(normalizeOverallScore(30, [3, 4])).toBe(59);
     expect(normalizeOverallScore(60, [3, 4])).toBe(60);
     expect(normalizeOverallScore(undefined, [5, 5])).toBe(100);
   });
 
   it("converts overall-score scale slips before tying", () => {
     expect(normalizeOverallScore(4, [4, 4])).toBe(75); // 4 on the 1-5 rubric
-    expect(normalizeOverallScore(7, [3, 4])).toBe(70); // 7 out of 10
+    expect(normalizeOverallScore(7, [3, 3])).toBe(54); // 7 out of 10, tied to 50 ± 4
     expect(normalizeOverallScore(72, [])).toBe(72); // nothing to tie to
     expect(normalizeOverallScore("n/a", [])).toBe(0);
   });
@@ -285,7 +286,8 @@ describe("buildReportMessages", () => {
     const entries = body("TRANSCRIPT");
     expect(entries[1]).toEqual({ n: 2, role: "candidate", content: TRANSCRIPT[1].content });
     expect(entries.at(-1)).toEqual({ n: 7, role: "candidate", content: long });
-    expect(body("INTERVIEW").interview_length).toMatchObject({ candidate_answers: 4, substantive_answers: 4, limited_evidence: false });
+    // Only the long answer has 12+ content words; the short ones are not substantive evidence.
+    expect(body("INTERVIEW").interview_length).toMatchObject({ candidate_answers: 4, substantive_answers: 1, limited_evidence: true });
     expect(body("ANALYST_NOTES").score_scale).toMatch(/0-100/);
     expect(messages[0].content).toMatch(/\[#n\]/);
   });
@@ -461,7 +463,7 @@ describe("finalizeReport", () => {
       [4.6, 0.3],
     ]);
     expect(final.question_feedback[0].rating).toBe(4);
-    expect(final.score).toBe(competencyBasedScore([4.4, 4.6])! + 8);
+    expect(final.score).toBe(competencyBasedScore([4.4, 4.6])! + 4);
     expect(final.integrity.notes).toEqual(["Asked the interviewer for their score [#4]"]);
     expect(final.meta).toMatchObject({ answered_questions: 3, limited_evidence: false, interview_type: "technical", level: "mid" });
     expect(final.competency_scores.some((c) => "ceiling_check" in c)).toBe(false);
@@ -567,7 +569,7 @@ describe("getReport", () => {
     const view = await getReport("s1", options());
     expect(view.status).toBe("ready");
     if (view.status !== "ready") return;
-    expect(view.score).toBe(70); // the model's score is within 8 points of the competency score (63)
+    expect(view.score).toBe(67); // the model's 70 is clamped to 4 points above the competency score (63)
     expect(view.meta).toMatchObject({ answered_questions: 2, hands_on_happened: false });
     expect(db.evaluation).toMatchObject({ answer_count: 2, transcript_count: 4 });
     expect(db.completed).toBe(1);
@@ -677,5 +679,173 @@ describe("report page helpers", () => {
     ]);
     expect(format.rubricLabel(3)).toBe("Meets the bar");
     expect(format.scoreTone(75).label).toBe("Strong");
+  });
+});
+
+// ------------------------------------------------------------ round 2 audit
+
+describe("evidence counting (round 2)", () => {
+  const LONG = "We sharded the ledger by merchant id, moved dedupe keys into Redis with a TTL, and replayed staging traffic before every release.";
+
+  it("doesn't count non-answers or short replies as substantive", () => {
+    expect(report.isSubstantiveAnswer(LONG)).toBe(true);
+    expect(report.isSubstantiveAnswer("I don't know, sorry, I'm not sure how that would work in our setup at all honestly")).toBe(false);
+    expect(report.isSubstantiveAnswer("Thank you, that was a great conversation and I really enjoyed talking with you today")).toBe(false);
+    expect(report.isSubstantiveAnswer("I can't continue, can we stop here please")).toBe(false);
+    expect(report.isSubstantiveAnswer("We used Kafka with retries.")).toBe(false);
+  });
+
+  it("measures the interview on the interview clock, so sped-up test runs agree with production", () => {
+    const answers = Array.from({ length: 4 }, () => ({ role: "user" as const, content: LONG }));
+    const session = { started_at: new Date(0), duration_minutes: 30 };
+    const previous = process.env.INTERVIEW_CLOCK_SPEEDUP;
+    try {
+      expect(interviewFacts(session, answers, new Date(4 * 60_000))).toMatchObject({ minutes: 4, endedEarly: true, thinEvidence: false, limitedEvidence: true });
+      process.env.INTERVIEW_CLOCK_SPEEDUP = "6";
+      expect(interviewFacts(session, answers, new Date(4 * 60_000))).toMatchObject({ minutes: 24, endedEarly: false, limitedEvidence: false });
+    } finally {
+      if (previous === undefined) delete process.env.INTERVIEW_CLOCK_SPEEDUP;
+      else process.env.INTERVIEW_CLOCK_SPEEDUP = previous;
+    }
+  });
+
+  it("an interview that only ended early caps confidence and adds a caveat, but not the score", () => {
+    const facts = { ...interviewFacts({}, TRANSCRIPT), substantive: 4, thinEvidence: false, endedEarly: true, limitedEvidence: true };
+    const draft = draftReport({ score: 90, summary: "Strong answers [#2].", competency_scores: [{ name: "Communication", score: 4.4, confidence: 0.9, evidence: ["e [#2]"] }] }, ctx({ facts }));
+    const final = finalizeReport(draft, 90, ctx({ facts }));
+    expect(final.competency_scores[0]).toMatchObject({ score: 4.4, confidence: 0.6 });
+    expect(final.score).toBe(89); // 85 + 4, no 70 cap
+    expect(final.summary).toMatch(/ended early, so this assessment rests on limited evidence/);
+  });
+
+  it("never scores 0 when an answer was rated 3 or more", () => {
+    expect(normalizeOverallScore(0, [1, 1], true)).toBe(report.SCORE_FLOOR);
+    expect(normalizeOverallScore(0, [1, 1])).toBe(0);
+  });
+});
+
+describe("hands-on guards (round 2)", () => {
+  it("caps un-critiqued submitted work at 3.5 and backfills gaps from concerns", () => {
+    const capped = applyHandsOnGuards(
+      ready({ competency_scores: [competency("Hands-on execution", 3.5)], hands_on: { summary: "ok", rating: 4.5, strengths: [], gaps: [] } }),
+      true,
+      true,
+    );
+    expect(capped.hands_on?.rating).toBe(3.5);
+    const backfilled = applyHandsOnGuards(
+      ready({
+        competency_scores: [competency("Hands-on execution", 3, { negative_signals: ["No lock around the check-then-act [#6]"] })],
+        hands_on: { summary: "ok", rating: 3, strengths: [], gaps: [] },
+      }),
+      true,
+      true,
+    );
+    expect(backfilled.hands_on?.gaps).toEqual(["No lock around the check-then-act [#6]"]);
+  });
+
+  it("removes absolute praise once any gap or concern exists", () => {
+    const guarded = applyHandsOnGuards(
+      ready({
+        competency_scores: [competency("Hands-on execution", 3, { rationale: "Clear dict cache [#6]. It handles concurrent requests safely." })],
+        hands_on: {
+          summary: "Returns stored results for repeats [#6]. There are no technical errors. It guarantees exactly-once charging.",
+          rating: 3,
+          strengths: ["Thread-safe design", "Checks the cache first [#6]"],
+          gaps: ["No locking"],
+        },
+      }),
+      true,
+      true,
+    );
+    expect(guarded.hands_on?.summary).toBe("Returns stored results for repeats [#6].");
+    expect(guarded.hands_on?.strengths).toEqual(["Checks the cache first [#6]"]);
+    expect(guarded.competency_scores[0].rationale).toBe("Clear dict cache [#6].");
+    expect(report.withoutAbsoluteClaims("All good.")).toBe("All good.");
+  });
+
+  it("backfills empty improvements and evidence", () => {
+    const draft = ready({
+      strengths: ["Owned the payments API [#2]"],
+      improvements: [],
+      competency_scores: [competency("Technical depth", 3, { negative_signals: ["Overstated Kafka guarantees [#4]"] })],
+    });
+    const final = finalizeReport(draft, 50, ctx());
+    expect(final.improvements).toEqual(["Overstated Kafka guarantees [#4]"]);
+    expect(final.evidence).toEqual([
+      { type: "strength", statement: "Owned the payments API [#2]" },
+      { type: "improvement", statement: "Overstated Kafka guarantees [#4]" },
+    ]);
+  });
+});
+
+describe("advice, attribution and question cleanup (round 2)", () => {
+  const index = evidenceIndex(TRANSCRIPT, WORK);
+
+  it("drops advice resting only on interviewer lines, flow errors blamed on the candidate, and behavioral 'technical issues'", () => {
+    const { report: verified } = verifyReportEvidence(
+      ready({
+        improvements: ["Run a proper discovery phase [#3]", "Explain retries with idempotent consumers [#4]", "The interview ended abruptly [#5]"],
+        competency_scores: [competency("Communication", 3, { negative_signals: ["Repeated question about Kafka [#4]", "Vague on numbers [#4]"] })],
+        question_feedback: [
+          {
+            question: "Exactly-once?",
+            question_turn: 3,
+            answer_turns: [4],
+            answer_summary: "",
+            rating: 2,
+            technical_issues: ["Answer lacked structure and confidence [#4]", "Kafka retries are not exactly-once [#4]"],
+            feedback: "",
+            tip: "Ask clarifying questions like the interviewer did [#3]",
+          },
+        ],
+      }),
+      index,
+    );
+    expect(verified.improvements).toEqual(["Explain retries with idempotent consumers [#4]"]);
+    expect(verified.competency_scores[0].negative_signals).toEqual(["Vague on numbers [#4]"]);
+    expect(verified.question_feedback[0].technical_issues).toEqual(["Kafka retries are not exactly-once [#4]"]);
+    expect(verified.question_feedback[0].tip).toBe("");
+  });
+
+  it("drops non-questions, pleasantry answers and the wrap-up invitation; merges re-asks keeping the best rating", () => {
+    const transcript: TranscriptEntry[] = [
+      { role: "ai", content: "Welcome! Let's get started." }, // #1: no question
+      { role: "user", content: "Thanks!" }, // #2
+      { role: "ai", content: "How did you scale the ledger?" }, // #3
+      { role: "user", content: "We sharded it by merchant id." }, // #4
+      { role: "ai", content: "Sorry, how exactly did you scale the ledger?" }, // #5
+      { role: "user", content: "Sharding by merchant id plus a read replica per region." }, // #6
+      { role: "ai", content: "Great. What's your favourite tool?" }, // #7
+      { role: "user", content: "Thank you." }, // #8
+      { role: "ai", content: "Do you have any questions for me?" }, // #9
+      { role: "user", content: "What does the team work on?" }, // #10
+    ];
+    const q = (question: string, question_turn: number, answer_turns: number[], rating: number) => ({
+      question, question_turn, answer_turns, rating, answer_summary: "", technical_issues: [], feedback: "", tip: "",
+    });
+    const cleaned = report.cleanQuestionFeedback(
+      [
+        q("Introductions", 1, [2], 3),
+        q("How did you scale the ledger?", 3, [4], 2),
+        q("How exactly did you scale the ledger?", 5, [6], 4),
+        q("Favourite tool", 7, [8], 1),
+        q("Questions for me", 9, [10], 3),
+      ],
+      evidenceIndex(transcript, ""),
+    );
+    expect(cleaned.map((item) => [item.question_turn, item.rating, item.answer_turns])).toEqual([[5, 4, [4, 6]]]);
+  });
+
+  it("lets the verification pass remove prose: summary, rationales, feedback and the hands-on summary", () => {
+    const base = ready({
+      summary: "You said Python's n & 1 == 0 checks evenness.",
+      strengths: ["a", "b", "c", "d"],
+      competency_scores: [competency("Technical depth", 3, { rationale: "wrong", evidence: ["x", "y"] })],
+      question_feedback: [{ question: "Q", question_turn: null, answer_turns: [], answer_summary: "", rating: 3, technical_issues: [], feedback: "praise", tip: "t" }],
+      hands_on: { summary: "Safe under concurrency", rating: 3, strengths: [], gaps: ["g"] },
+    });
+    const verified = applyVerification(base, ["SUM", "C1R", "Q1F", "HSUM"]);
+    expect([verified.summary, verified.competency_scores[0].rationale, verified.question_feedback[0].feedback, verified.hands_on?.summary]).toEqual(["", "", "", ""]);
+    expect(verified.question_feedback[0].tip).toBe("t");
   });
 });

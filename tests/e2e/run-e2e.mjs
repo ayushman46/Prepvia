@@ -359,7 +359,8 @@ await step("ending the interview starts the report; it is generated once, cached
   assert.ok([first.status, second.status].every((s) => s === 200 || s === 202), `statuses ${first.status}/${second.status}`);
   const report = await pollReport(sessionId);
   assert.equal(report.status, "ready");
-  assert.equal(report.score, 72);
+  // The model said 72; the overall score is tied to within 4 points of the competency score (65).
+  assert.equal(report.score, 69);
   assert.deepEqual(report.competency_scores.map((c) => c.score), [3.9, 3.3]);
   assert.ok(report.competency_scores.every((c) => c.rationale.length > 5));
   assert.equal(report.question_feedback.length, 1);
@@ -367,13 +368,14 @@ await step("ending the interview starts the report; it is generated once, cached
   assert.deepEqual(report.integrity.notes, ["Left the interview tab 1 time.", "Pasted large blocks of text 1 time."]);
   const view = await json(`/api/interview/${sessionId}`);
   assert.equal(report.meta.answered_questions, view.body.transcript.filter((m) => m.role === "user").length);
-  assert.equal(report.meta.limited_evidence, false);
+  // The scripted answers are one-liners, so they are not substantive evidence.
+  assert.equal(report.meta.limited_evidence, true);
   assert.deepEqual(report.question_feedback[0].technical_issues, []);
   assert.ok((await fakeStats()).verify >= 1, "the verification pass ran");
   const before = (await fakeStats()).report;
   const again = await json(`/api/report/${sessionId}`);
   assert.equal(again.status, 200);
-  assert.equal(again.body.score, 72);
+  assert.equal(again.body.score, 69);
   assert.equal((await fakeStats()).report, before, "cached report does not call the model again");
   assert.ok(before <= 1, `report generated ${before} times`);
 });
