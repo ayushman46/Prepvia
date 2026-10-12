@@ -222,8 +222,11 @@ type AnswerTurn = {
   superseded: boolean;
 };
 
-/** Interrupting Aria this soon after her reply starts means the candidate hadn't finished. */
-const FALSE_START_MS = 1_500;
+/**
+ * Interrupting Aria this soon after her reply starts (her opening acknowledgement,
+ * including the ~0.3 s barge-in detection) means the candidate hadn't finished.
+ */
+const FALSE_START_MS = 2_000;
 /** A sound that hasn't turned into close speech by then doesn't hold Aria's reply. */
 const ONSET_HOLD_MS = 400;
 
