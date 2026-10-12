@@ -59,7 +59,8 @@ describe("real user trace replay (listen-2026-10-12T13-48-15)", () => {
   for (const attempt of attempts) {
     it(`accepts the attempt at ${attempt.atS} s`, () => {
       const verdicts = replay(attempt);
-      expect(verdicts.length).toBeGreaterThan(0);
+      // One answer, not split into fragments by mid-sentence dips.
+      expect(verdicts.filter((v) => v.accepted)).toHaveLength(1);
       expect(verdicts.some((v) => v.accepted), JSON.stringify(verdicts.map(({ accepted, reason, samples }) => ({ accepted, reason, samples })))).toBe(true);
     });
   }
