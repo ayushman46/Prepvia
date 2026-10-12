@@ -11,6 +11,7 @@ This document records every test suite, benchmark, and measurement taken while r
 | Unit tests (`npm test`) | Pure logic + orchestration with mocked I/O | **161 / 161 pass** |
 | API end-to-end (`npm run test:e2e`) | Production server, MongoDB Atlas, Microsoft Edge TTS; LLM/STT simulated | **29 / 29 pass** |
 | Live browser (`npm run test:live-browser`) | Chromium, Silero VAD, NVIDIA LLM, Edge TTS, MongoDB, Web Audio playback (STT simulated) | **21 / 21 pass** on the voice-input fix (adds push-to-talk and microphone-reconnect steps; earlier: 19 / 19 three runs in a row) |
+| Complete audio input (`npm run test:audio-capture`) | Chromium, Silero VAD + noise gate, real Groq Whisper, Edge TTS, MongoDB (LLM simulated); 21 spoken scenarios incl. thinking pauses, 1-word and 76 s answers | **21 / 21 complete, mean audio coverage 100 %** (baseline: "No." unheard, every ≥1 s pause split the answer) ([details](#complete-audio-input-npm-run-testaudio-capture)) |
 | Real microphone (`npm run test:real-mic`) | The Mac's built-in microphone and speakers, Chromium and Brave, `next start` and `next dev` | Voice works under `next dev` (was disabled); background voices send nothing; an invalid key switches to typing after one request (see [real microphone](#real-microphone-live-voice-input)) |
 | Load (`tests/load/run.mjs`) | 30 concurrent candidates with real Edge TTS; 50 without TTS | **0 errors, 0 5xx, consistent data** |
 | Interview quality (`npm run test:quality`) | 5 LLM-simulated candidate personas vs the real interviewer, LLM judge | **4.78 / 5** mean judge score on the final build (4.86 on the previous one); strong vs vague candidate reports 78 vs 28 ([§6](#6-interview-quality-evaluation)) |
@@ -95,6 +96,34 @@ Speech that only *resembles* the candidate's (loud voices next to the laptop) ca
 | Browser suite with real Groq (`GROQ_API_KEY_LIVE`) | conversation 14 / 14, canvas 7 / 7; voice turns 1,683–1,833 ms end to end (median 1,719–1,765 ms over two runs), the same as with simulated STT |
 
 One harness fix came out of this: the suite now matches spoken answers by words rather than exact text, since Whisper writes its own punctuation and spellings ("post-mortem" for "postmortem").
+
+### Complete audio input (`npm run test:audio-capture`)
+
+**Why.** "Does the app take the candidate's whole answer?" can't be judged from transcripts alone. `tests/live-browser/audio-capture.mjs` composes 21 spoken answers with macOS `say` (5 voices, fast and slow talkers, quiet speech at −14 dB, a room-noise bed, soft first and last words, thinking pauses of 1–3 s, "let me think", a 1-word "No.", a 76 s answer, and ending the interview mid-sentence), plays each into the real app (real Silero VAD and noise gate, real server, **real Groq Whisper**, real Edge TTS; fake LLM so dozens of turns don't use NVIDIA quota) and measures from ground truth:
+
+- **audio coverage**: which of the clip's voiced 10 ms frames are inside the audio the app actually transcribed (request bodies captured in the page, aligned by envelope correlation), with head / tail / gap loss;
+- **word recall and WER** of what the server transcribed against the script, first and last words, and how many turns the answer became.
+
+**What the baseline showed** (before this round): a 1-word "No." was never heard (7 confident frames, the noise gate wanted 8); every thinking pause of 1 s or more split the answer in two — the first half was sent at 0.8 s of silence and the rest only survived because it happened to overlap Aria's reply (with a slower reply it was dropped with "Aria is still thinking. Please repeat that"); and Whisper wrote "item potency keys" for "idempotency keys".
+
+**Fixes** (bugs 53–60 below): semantic end of turn (the speculative transcript of each pause decides the silence: finished sentence 0.8 s, unpunctuated 1.4 s, "…and"/"um" 2.2 s, "let me think" 5 s); continuations merged into the answer (Aria's reply is held while the candidate keeps talking, the server merges the continuation and withdraws the unheard reply; a barge-in within 2 s of her reply is a false start and merges too); short crisp words accepted; answers over 2 minutes sent in parts; End delivers an answer in progress; Whisper primed with the interview's vocabulary.
+
+| Scenario | Baseline | Final |
+|---|---|---|
+| "Yes." / "Around two years." / quiet "I'm not sure, sorry." | ✓ | ✓ |
+| **"No."** (UK voice, 1 syllable) | **not heard** | ✓ |
+| 15 s answers: US, UK, Indian, Australian voices; fast (260 wpm); slow (120 wpm) | ✓ (one had "item potency" for idempotency) | ✓, 0 % WER |
+| Quiet speaker (−14 dB), room-noise bed, soft first/last words | ✓ | ✓ |
+| **1.0 s pause** mid-sentence | 2 turns | **1 turn**, 100 % |
+| **1.5 s pause** after a finished sentence | 2 turns | **1 turn**, 100 % |
+| **2.0 s pause** after "…and" | 2 turns | **1 turn**, 100 % |
+| **3.0 s pause** between two thoughts | 2 turns | **1 turn**, 100 % |
+| "Let me think." + 3 s silence | (new) | 1 turn, 100 % |
+| A finished sentence + two more after 1.2 s pauses | (new) | 1 turn, 100 % audio ("re-dis" for Redis) |
+| 76 s answer with natural pauses | ✓ | ✓, 0 % WER |
+| End clicked 0.3 s after an unfinished sentence | (new) | answer saved before the interview closed |
+
+**Final: 21 / 21 scenarios complete, mean audio coverage 100 %** (runs 3 and 4, real Whisper). Speech end → interviewer audio for finished answers stayed at **1.58–1.83 s** (baseline run 1.46–1.77 s; fake LLM + real Edge TTS + real Groq), so the longer pauses cost nothing when the candidate is done; answers that continue after a pause are answered 2.3–2.6 s after they finish (one extra transcription of the merged audio); the 76 s answer 4.4 s.
 
 ---
 
@@ -275,6 +304,15 @@ Deterministic checks across rounds: filler-praise openers **22 % → 0 %**; stac
 | 50 | code review | Whisper noise outputs such as "Thank you. Thank you.", "[Music]" or "Bye bye." were saved as answers | Normalized, sentence-level hallucination filter that keeps real short answers ("Yes.", "Okay.") |
 | 51 | adversarial review | Overlapping microphone restarts could wire two live streams into the detector; a recovered detector leaked on unmount | Start, pause and restart run one at a time; restarts coalesce; every detector and stream is released on unmount |
 | 52 | adversarial review | Push-to-talk edge cases: no length cap (413 after ~131 s), taps sent as answers, a re-press during the tail was lost, Space hijacked focused buttons | 2-minute cap with auto-send, minimum hold length, re-press support, Space left to focused controls |
+| 53 | audio-capture harness + audit | A thinking pause of ≥0.8 s ended the answer; what the candidate said next was dropped ("please repeat") or became a separate turn | Semantic end of turn from the pause's speculative transcript (0.8 / 1.4 / 2.2 / 5 s); the tracker drives vad-web's redemption via `setOptions`, verified frame-for-frame against vad-web's own frame processor |
+| 54 | audio-capture harness | Speech after the answer was sent (before Aria's reply was heard) was discarded | Aria's reply is held while the candidate talks; the continuation is sent as an amend turn; the server merges it into the last answer and withdraws the unheard reply (question count rolled back); a barge-in within 2 s of her reply is a false start |
+| 55 | audio-capture harness | A 1-word "No." was rejected by the noise gate (7 confident frames, 8 required) | Short crisp words pass with a 160 ms unbroken run 18 dB over the room floor |
+| 56 | audio-capture harness | Whisper wrote "item potency keys" for "idempotency keys" (and the report would quote it) | Whisper prompt with the interview's vocabulary from the role, job description and resume (cached per session) |
+| 57 | audit | Ending the interview right after answering lost that answer, or the report was built before it was saved and cached without it | End delivers the answer in progress (`submitUserSpeechOnPause`) and waits for answers in flight; the report waits for the turn lock and regenerates if a late answer arrives |
+| 58 | audit | A Groq 429 on a speculative call made the real answer's transcription fail at once; any STT/network failure threw the recording away | Speculative and real calls are separated (real answers wait out a short limit); one automatic resend; Retry resends the kept audio/text |
+| 59 | audit | The echo filter discarded real answers that restated the question ("I would design a rate limiter for the payments API") | Echo needs the interviewer's word order (LCS) and no first-person words of its own |
+| 60 | audit | Interrupted replies were saved in full, so the interviewer and the report treated unheard questions as asked | The client sends what was heard; the transcript reads the reply as heard ("…[interrupted]") for the interviewer, analysis and report |
+| 61 | report accuracy audit | Reports: 69 % of 545 claims supported, 9 % contradicted (tips for things already done, interviewer words attributed to the candidate, "runs/passes all cases" without execution), overall scores +7 on average | Numbered transcript with citations, quote verification, score tied to competencies (±8), hands-on guards, calibration anchors and rules (see §6) |
 
 ---
 

@@ -28,10 +28,22 @@ export function TranscriptPane({ messages, candidateName }: { messages: ChatMess
     if (el && followRef.current) el.scrollTo({ top: el.scrollHeight, behavior: "smooth" });
   }, [messages]);
 
+  // The pane narrows when the canvas opens (or the window resizes) and the text reflows:
+  // stay pinned to the latest message.
+  useEffect(() => {
+    const el = scrollRef.current;
+    if (!el || typeof ResizeObserver === "undefined") return;
+    const observer = new ResizeObserver(() => {
+      if (followRef.current) el.scrollTop = el.scrollHeight;
+    });
+    observer.observe(el);
+    return () => observer.disconnect();
+  }, []);
+
   return (
     <div
       ref={scrollRef}
-      className="mx-auto w-full max-w-3xl flex-1 space-y-5 overflow-y-auto px-1 py-4 md:px-4"
+      className="mx-auto w-full max-w-3xl flex-1 space-y-5 overflow-y-auto px-1 py-4 [mask-image:linear-gradient(to_bottom,transparent,black_24px)] md:px-4"
       role="log"
       aria-live="polite"
       aria-label="Interview transcript"

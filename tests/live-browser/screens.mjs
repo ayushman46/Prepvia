@@ -79,10 +79,11 @@ const status = (page) => page.getByTestId("status").innerText().catch(() => "");
 const browser = await chromium.launch({ args: ["--autoplay-policy=no-user-gesture-required", "--use-fake-ui-for-media-stream"] });
 try {
   await waitUntil(async () => (await fetch(`${BASE}/api/health`)).ok, 90_000);
+  const only = args.get("devices")?.split(",");
   for (const device of [
     { tag: "desktop", viewport: { width: 1366, height: 860 } },
     { tag: "phone", viewport: { width: 390, height: 844 }, isMobile: true, hasTouch: true, deviceScaleFactor: 2 },
-  ]) {
+  ].filter((d) => !only || only.includes(d.tag))) {
     console.log(`\n${device.tag}`);
     const context = await browser.newContext({ ...device, permissions: ["microphone"] });
     await context.addInitScript({ path: join(root, "tests/live-browser/fake-mic.js") });
@@ -146,14 +147,20 @@ try {
     await waitUntil(async () => /Your turn/.test(await status(page)), 60_000);
     await page.getByLabel("Type an answer").click(); // back to voice
 
-    await page.getByTestId("capture-mode").click();
-    await sleep(300);
-    await shot(page, t("11-push-to-talk"), "push-to-talk mode");
-    await page.getByTestId("capture-mode").click();
+    // On phones the canvas tab may already have opened (accelerated clock): go back to the interview.
+    if (await page.getByRole("button", { name: "interview", exact: true }).isVisible().catch(() => false)) {
+      await page.getByRole("button", { name: "interview", exact: true }).click();
+    }
+    if (await page.getByTestId("capture-mode").isVisible().catch(() => false)) {
+      await page.getByTestId("capture-mode").click();
+      await sleep(300);
+      await shot(page, t("11-push-to-talk"), "push-to-talk mode");
+      await page.getByTestId("capture-mode").click();
+    }
 
     // Drive the clock to the hands-on canvas.
     for (let i = 0; i < 8 && !(await page.getByLabel("Hands-on canvas").isVisible().catch(() => false)); i++) {
-      if (device.tag === "phone" && (await page.getByRole("button", { name: "canvas" }).isVisible().catch(() => false))) break;
+      if (device.tag === "phone" && (await page.getByRole("button", { name: "canvas", exact: true }).isVisible().catch(() => false))) break;
       if (!(await page.locator("#answer").isVisible().catch(() => false))) await page.getByLabel("Type an answer").click();
       await page.locator("#answer").fill("We tracked p95 latency and error budget burn on every deploy.");
       await page.locator("#answer").press("Enter");
@@ -162,8 +169,10 @@ try {
     }
     await sleep(1_000);
     await shot(page, t("12-canvas"), "hands-on canvas open");
-    if (device.tag === "phone" && (await page.getByRole("button", { name: "interview" }).isVisible().catch(() => false))) {
-      await page.getByRole("button", { name: "interview" }).click();
+    if (device.tag === "phone" && (await page.getByRole("button", { name: "interview", exact: true }).isVisible().catch(() => false))) {
+      await page.getByRole("button", { name: "canvas", exact: true }).click();
+      await shot(page, t("12b-canvas-tab"), "phone: canvas tab with the status strip");
+      await page.getByRole("button", { name: "interview", exact: true }).click();
       await shot(page, t("13-canvas-interview-tab"), "phone: interview tab while the canvas is open");
     }
 
