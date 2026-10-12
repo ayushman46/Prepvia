@@ -8,7 +8,7 @@ import { cn } from "@/lib/cn";
 
 const CodeEditor = dynamic(() => import("./CodeEditor"), {
   ssr: false,
-  loading: () => <div className="flex h-full items-center justify-center text-sm text-vast/60">Loading editor…</div>,
+  loading: () => <div className="flex h-full items-center justify-center text-sm text-vast/60">Opening the editor…</div>,
 });
 
 export const CANVAS_LANGUAGE_LABELS: Record<string, string> = {
