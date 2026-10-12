@@ -7,6 +7,8 @@ export function Navbar() {
   const pathname = usePathname();
   // Upload and setup are a focused flow: no marketing links or competing CTA, just a way out.
   const inFlow = pathname === "/upload" || pathname === "/setup";
+  // The report has its own "Practice again" action: no second CTA in the nav.
+  const onReport = pathname?.startsWith("/report/") ?? false;
 
   // The interview room is a focused, full-screen experience.
   if (pathname?.startsWith("/interview/")) return null;
@@ -20,6 +22,10 @@ export function Navbar() {
         {inFlow ? (
           <Link href="/" className="pr-4 text-sm font-semibold underline underline-offset-4 md:pr-6">
             Exit
+          </Link>
+        ) : onReport ? (
+          <Link href="/" className="pr-4 text-sm font-semibold underline underline-offset-4 md:pr-6">
+            Home
           </Link>
         ) : (
           <>
