@@ -3,7 +3,7 @@
 import { useEffect, useRef, type MutableRefObject } from "react";
 import { cn } from "@/lib/cn";
 
-export type OrbMode = "idle" | "speaking" | "listening" | "thinking";
+export type OrbMode = "idle" | "waiting" | "speaking" | "listening" | "thinking";
 
 /**
  * Animated interviewer presence. Reads live audio levels every frame
@@ -44,10 +44,23 @@ export function InterviewerOrb({
   return (
     <div
       ref={ref}
-      className={cn("orb relative flex aspect-square items-center justify-center", `orb-${mode}`, className)}
+      className={cn(
+        "orb relative flex aspect-square items-center justify-center",
+        // "waiting" breathes like idle but dimmed, so the orb visibly hands the floor to the candidate.
+        mode === "waiting" ? "orb-idle orb-waiting [&_.orb-core]:brightness-[.85] [&_.orb-core]:saturate-[.45] [&_.orb-halo]:opacity-0" : `orb-${mode}`,
+        className,
+      )}
       role="img"
       aria-label={
-        mode === "speaking" ? "Interviewer speaking" : mode === "listening" ? "Listening to you" : mode === "thinking" ? "Interviewer thinking" : "Interviewer"
+        mode === "speaking"
+          ? "Interviewer speaking"
+          : mode === "listening"
+            ? "Listening to you"
+            : mode === "thinking"
+              ? "Interviewer thinking"
+              : mode === "waiting"
+                ? "Interviewer waiting for your answer"
+                : "Interviewer"
       }
     >
       <div className="orb-halo absolute inset-0 rounded-full" />
