@@ -16,6 +16,15 @@ const config: Config = {
         fog: "#8a8a80",
         charcoal: "#222222",
       },
+      // Mirrors the layered shadows defined as CSS variables in globals.css.
+      boxShadow: {
+        card: "var(--shadow-card)",
+        lift: "var(--shadow-btn)",
+        "lift-hover": "var(--shadow-btn-hover)",
+      },
+      transitionTimingFunction: {
+        "out-soft": "cubic-bezier(0.2, 0.8, 0.2, 1)",
+      },
       fontFamily: {
         serif: ["var(--font-eb-garamond)", "Georgia", "serif"],
         sans: ["var(--font-figtree)", "system-ui", "sans-serif"],
