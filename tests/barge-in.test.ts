@@ -36,6 +36,16 @@ describe("BargeInDetector", () => {
     expect(fired.slice(0, -1).some(Boolean)).toBe(false);
     expect(d.size).toBe(0);
   });
+  it("still fires on confident speech while Aria plays loudly (old behaviour kept)", () => {
+    const d = new BargeInDetector();
+    const loudPlayback = { probability: 0.85, rms: 0.05, noiseFloor: 0.0015, outputRms: outputLevelToRms(1) };
+    expect(Array.from({ length: 7 }, () => d.push(loudPlayback)).at(-1)).toBe(true);
+  });
+  it("ignores near-voice frames near the floor in a noisy room", () => {
+    const d = new BargeInDetector();
+    const hum = { probability: 0.5, rms: 0.05, noiseFloor: 0.02, outputRms: 0 };
+    expect(Array.from({ length: 30 }, () => d.push(hum)).some(Boolean)).toBe(false);
+  });
   it("does not fire on echo of Aria's voice at moderate probability", () => {
     const d = new BargeInDetector();
     const echo = { probability: 0.6, rms: 0.04, noiseFloor: 0.0015, outputRms: outputLevelToRms(0.3) };
