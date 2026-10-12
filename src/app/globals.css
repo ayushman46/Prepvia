@@ -76,11 +76,15 @@
     color: var(--color-vast-ink);
   }
 
+  /* Ember halo with an ink core: reads >= 3:1 on cream and on the dark interview room. */
   :focus-visible {
-    outline: 3px solid var(--color-ember-glow);
-    outline-offset: 3px;
-    border-radius: 6px;
-    box-shadow: 0 0 0 6px rgba(255, 169, 70, 0.18);
+    outline: 2px solid var(--color-vast-ink);
+    outline-offset: 2px;
+    box-shadow: 0 0 0 6px var(--color-ember-glow);
+  }
+  .bg-vast :focus-visible,
+  .bg-forest :focus-visible {
+    outline-color: var(--color-lumen-cream);
   }
 }
 
@@ -159,8 +163,13 @@
   .icon-btn:active {
     transform: none !important;
   }
-  .orb-core,
+  /* Keep the orb's colour/glow feedback but drop the audio-reactive pulsing. */
+  .orb-core {
+    transform: none !important;
+    transition: none !important;
+  }
   .orb-halo {
+    transform: scale(0.95) !important;
     transition: none !important;
   }
 }
