@@ -34,9 +34,9 @@ function frameOf(level: number): Float32Array {
   return new Float32Array(512).fill(level);
 }
 
-function replay(attempt: Attempt): UtteranceVerdict[] {
+function replay(attempt: Attempt, settings: typeof SETTINGS = SETTINGS): UtteranceVerdict[] {
   const verdicts: UtteranceVerdict[] = [];
-  const tracker = new UtteranceTracker({ ...SETTINGS, onSpeculate: () => {} });
+  const tracker = new UtteranceTracker({ ...settings, onSpeculate: () => {} });
   const feed = (p: number, level: number) => {
     tracker.frame(p, frameOf(level), level);
     const ended = tracker.takeEnded();
@@ -63,4 +63,15 @@ describe("real user trace replay (listen-2026-10-12T13-48-15)", () => {
       expect(verdicts.some((v) => v.accepted), JSON.stringify(verdicts.map(({ accepted, reason, samples }) => ({ accepted, reason, samples })))).toBe(true);
     });
   }
+
+  it("the pre-4d136aef settings lost some of these attempts (the test has teeth)", () => {
+    const old = {
+      ...SETTINGS,
+      positiveThreshold: 0.5,
+      negativeThreshold: 0.35,
+      gate: { ...SETTINGS.gate, nearVoice: undefined },
+    } as unknown as typeof SETTINGS;
+    const lost = attempts.filter((a) => !replay(a, old).some((v) => v.accepted)).map((a) => a.atS);
+    expect(lost.length).toBeGreaterThan(0);
+  });
 });
