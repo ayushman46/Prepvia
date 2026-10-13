@@ -975,7 +975,31 @@ export function draftReport(raw: Record<string, unknown>, ctx: ReportContext): R
  * - the overall score is tied to the competency mean (normalizeOverallScore);
  * - empty improvements and evidence are backfilled from concerns and strengths.
  */
+/**
+ * A candidate who had a hands-on exercise always gets a hands-on section, even when
+ * the model left it out or verification removed its summary: it is rebuilt from the
+ * hands-on competency (rating, rationale, signals), or says that nothing was submitted.
+ */
+export function ensureHandsOn(report: ReadyReport, exerciseHappened: boolean, workSubmitted: boolean | null): ReadyReport {
+  if (!exerciseHappened || report.hands_on?.summary.trim()) return report;
+  const competency = report.competency_scores.find((c) => isHandsOnCompetency(c.name, true));
+  const summary =
+    workSubmitted === false
+      ? "No work was submitted on the canvas, so the hands-on exercise couldn't be assessed."
+      : competency?.rationale.trim() || "Your canvas work was reviewed; see the hands-on competency score for the assessment.";
+  return {
+    ...report,
+    hands_on: {
+      summary,
+      rating: report.hands_on?.rating ?? competency?.score ?? (workSubmitted === false ? 1 : null),
+      strengths: report.hands_on?.strengths.length ? report.hands_on.strengths : (competency?.positive_signals ?? []).slice(0, 6),
+      gaps: report.hands_on?.gaps.length ? report.hands_on.gaps : (competency?.negative_signals ?? []).slice(0, 6),
+    },
+  };
+}
+
 export function finalizeReport(draft: ReadyReport, rawScore: unknown, ctx: ReportContext): ReadyReport {
+  draft = ensureHandsOn(draft, ctx.exerciseHappened, ctx.workSubmitted);
   const limited = ctx.facts.limitedEvidence;
   const thin = ctx.facts.thinEvidence;
   let report: ReadyReport = {

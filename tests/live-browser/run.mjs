@@ -127,7 +127,7 @@ const playAnswer = (page, wav) => page.evaluate((b64) => window.__fakeMic.play(b
 function spoken(text) {
   const words = text.toLowerCase().match(/[a-z0-9']+/g) ?? [];
   const picked = words.length > 6 ? words.slice(2, 8) : words;
-  return new RegExp(picked.map((w) => w.replace(/'/g, "'?")).join("[^a-z0-9]+"), "i");
+  return new RegExp(picked.map((w) => w.replace(/'/g, "'?")).join("[^a-z0-9]*"), "i");
 }
 
 /** Sample the orb's live level while the interviewer speaks (proves audio flows through the analyser). */

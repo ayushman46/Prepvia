@@ -849,3 +849,34 @@ describe("advice, attribution and question cleanup (round 2)", () => {
     expect(verified.question_feedback[0].tip).toBe("t");
   });
 });
+
+describe("ensureHandsOn", () => {
+  const base = {
+    score: 60,
+    summary: "s",
+    strengths: [],
+    improvements: [],
+    question_feedback: [],
+    hands_on: null,
+    integrity: { tab_switches: 0, large_paste: 0, notes: [] },
+    evidence: [],
+    competency_scores: [
+      { name: "Hands-on execution", score: 3, rationale: "Clear approach; missed the duplicate case. [#9]", confidence: 0.7, evidence: [], positive_signals: ["Readable code"], negative_signals: ["No duplicate check"] },
+    ],
+  } as unknown as Parameters<typeof report.ensureHandsOn>[0];
+
+  it("rebuilds a hands-on section the model left out, from the hands-on competency", () => {
+    const out = report.ensureHandsOn(base, true, true);
+    expect(out.hands_on).toEqual({ summary: "Clear approach; missed the duplicate case. [#9]", rating: 3, strengths: ["Readable code"], gaps: ["No duplicate check"] });
+  });
+
+  it("refills a summary that verification removed, keeping the rest", () => {
+    const blanked = { ...base, hands_on: { summary: "", rating: 2.5, strengths: [], gaps: ["Race on concurrent requests"] } };
+    expect(report.ensureHandsOn(blanked, true, true).hands_on).toMatchObject({ summary: expect.stringContaining("Clear approach"), rating: 2.5, gaps: ["Race on concurrent requests"] });
+  });
+
+  it("says nothing was submitted, and adds nothing without an exercise", () => {
+    expect(report.ensureHandsOn(base, true, false).hands_on?.summary).toMatch(/No work was submitted/);
+    expect(report.ensureHandsOn(base, false, null).hands_on).toBeNull();
+  });
+});
