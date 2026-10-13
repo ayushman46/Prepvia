@@ -46,10 +46,13 @@ async function request<T>(input: string, init?: RequestInit): Promise<{ status: 
   return { status: response.status, data: (await response.json()) as T };
 }
 
-export async function uploadResume(file: File): Promise<{ text: string; pages: number; chars: number }> {
+/** `name`: the candidate's name as found on the resume, or null. */
+export type UploadedResume = { text: string; pages: number; chars: number; name: string | null };
+
+export async function uploadResume(file: File): Promise<UploadedResume> {
   const form = new FormData();
   form.append("file", file);
-  return (await request<{ text: string; pages: number; chars: number }>("/api/resume/upload", { method: "POST", body: form })).data;
+  return (await request<UploadedResume>("/api/resume/upload", { method: "POST", body: form })).data;
 }
 
 export async function startInterview(input: {

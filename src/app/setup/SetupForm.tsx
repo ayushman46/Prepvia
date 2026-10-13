@@ -7,7 +7,8 @@ import { ClientApiError, startInterview } from "@/lib/api";
 import { LIMITS } from "@/lib/protocol";
 import { PROFILE_STORAGE_KEY, RESUME_STORAGE_KEY } from "@/lib/storage-keys";
 
-type StoredResume = { text: string; name?: string; pages?: number };
+/** `name` is the file name; `candidateName` the person's name found on the resume. */
+type StoredResume = { text: string; name?: string; pages?: number; candidateName?: string | null };
 type StoredProfile = { name?: string; role?: string; level?: string };
 
 function readStorage<T>(storage: "session" | "local", key: string): T | null {
@@ -23,7 +24,9 @@ function readStorage<T>(storage: "session" | "local", key: string): T | null {
 export default function SetupForm() {
   const router = useRouter();
   const [profile] = useState(() => readStorage<StoredProfile>("local", PROFILE_STORAGE_KEY));
-  const [name, setName] = useState(profile?.name ?? "");
+  // The name on a freshly uploaded resume wins over one remembered from an earlier session.
+  const [resumeName] = useState(() => readStorage<StoredResume>("session", RESUME_STORAGE_KEY)?.candidateName?.trim() || "");
+  const [name, setName] = useState(resumeName || profile?.name || "");
   const [role, setRole] = useState(profile?.role ?? "");
   const [jobDescription, setJobDescription] = useState("");
   const [duration, setDuration] = useState(30);
@@ -116,6 +119,11 @@ export default function SetupForm() {
                 className="w-full rounded-xl border-2 border-vast bg-cream px-4 py-3 outline-none transition-shadow focus:border-forest focus:ring-4 focus:ring-forest/20"
                 placeholder="Jane Doe"
               />
+              {resumeName && name === resumeName && (
+                <p className="mt-1.5 text-xs text-vast/70" data-testid="name-from-resume">
+                  Filled in from your resume. Edit it if it&apos;s not right.
+                </p>
+              )}
             </div>
             <div>
               <label htmlFor="target-role" className="mb-2 block font-semibold">Target role</label>

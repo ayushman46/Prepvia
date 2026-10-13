@@ -112,13 +112,14 @@ await step("VAD assets are served with immutable caching", async () => {
   }
 });
 
-await step("resume upload extracts PDF text", async () => {
+await step("resume upload extracts PDF text and the candidate's name", async () => {
   const form = new FormData();
   form.append("file", new Blob([readFileSync(process.env.PDF_PATH)], { type: "application/pdf" }), "resume.pdf");
   const { status, body } = await json("/api/resume/upload", { method: "POST", body: form });
   assert.equal(status, 200, JSON.stringify(body));
   assert.match(body.text, /Payments API/);
   assert.equal(body.pages, 1);
+  assert.equal(body.name, "Jane Doe"); // first line: "Jane Doe - Backend Engineer"
   resumeText = body.text;
 });
 

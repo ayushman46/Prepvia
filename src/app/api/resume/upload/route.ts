@@ -3,6 +3,7 @@ import { LIMITS } from "@/lib/protocol";
 import { config } from "@/server/config";
 import { ApiError, clientIp, handler } from "@/server/http";
 import { enforceRateLimit } from "@/server/rate-limit";
+import { extractCandidateName } from "@/lib/resume-name";
 import { extractResumeText } from "@/server/resume";
 
 export const runtime = "nodejs";
@@ -29,5 +30,6 @@ export const POST = handler("resume upload", async (request: Request) => {
   }
 
   const { text, pages } = await extractResumeText(new Uint8Array(await file.arrayBuffer()));
-  return NextResponse.json({ text, pages, chars: text.length });
+  // The setup form is filled in with the name found on the resume (null when unsure).
+  return NextResponse.json({ text, pages, chars: text.length, name: extractCandidateName(text) });
 });

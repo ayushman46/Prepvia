@@ -42,9 +42,9 @@ export default function UploadPage() {
 
     setIsUploading(true);
     try {
-      const { text, pages } = await uploadResume(file);
+      const { text, pages, name: candidateName } = await uploadResume(file);
       try {
-        sessionStorage.setItem(RESUME_STORAGE_KEY, JSON.stringify({ text, name: file.name, pages }));
+        sessionStorage.setItem(RESUME_STORAGE_KEY, JSON.stringify({ text, name: file.name, pages, candidateName }));
       } catch {
         // Storage can be unavailable (private mode); setup works without a resume.
       }
