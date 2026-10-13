@@ -880,3 +880,34 @@ describe("ensureHandsOn", () => {
     expect(report.ensureHandsOn(base, false, null).hands_on).toBeNull();
   });
 });
+
+describe("fillMissingProse", () => {
+  const competency = (over: Record<string, unknown>) => ({ name: "Communication", score: 3, rationale: "", confidence: 0.6, evidence: [], positive_signals: [], negative_signals: [], ...over });
+  const base = {
+    score: 40,
+    summary: "",
+    strengths: ["You described using an outbox table to atomically commit writes and events. [#4]"],
+    improvements: ["Give specific categories of reconciliation errors. [#12]"],
+    question_feedback: [],
+    hands_on: null,
+    integrity: { tab_switches: 0, large_paste: 0, notes: [] },
+    evidence: [],
+    competency_scores: [
+      competency({ name: "Technical depth", positive_signals: ["Outbox pattern [#4]"], negative_signals: ["Vague on metrics [#12]"] }),
+      competency({ name: "Ownership", evidence: ["Ran both systems in parallel [#16]"] }),
+      competency({ name: "Collaboration", score: null }),
+      competency({ name: "Problem solving", rationale: "Structured approach. [#8]" }),
+    ],
+  } as unknown as Parameters<typeof report.fillMissingProse>[0];
+
+  it("rebuilds a removed summary and rationales from what verification kept", () => {
+    const out = report.fillMissingProse(base);
+    expect(out.summary).toBe(
+      "Strongest moment: You described using an outbox table to atomically commit writes and events [#4]. Main thing to work on next: Give specific categories of reconciliation errors [#12].",
+    );
+    expect(out.competency_scores.map((c) => c.name)).toEqual(["Technical depth", "Ownership", "Problem solving"]);
+    expect(out.competency_scores[0].rationale).toBe("Strong: Outbox pattern [#4]. To improve: Vague on metrics [#12].");
+    expect(out.competency_scores[1].rationale).toBe("Based on: Ran both systems in parallel [#16].");
+    expect(out.competency_scores[2].rationale).toBe("Structured approach. [#8]");
+  });
+});

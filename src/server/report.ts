@@ -998,8 +998,46 @@ export function ensureHandsOn(report: ReadyReport, exerciseHappened: boolean, wo
   };
 }
 
+/** "You described X. [#4]" → "You described X [#4]" style join of verified items. */
+function joinItems(items: string[], max: number): string {
+  return items
+    .slice(0, max)
+    .map((item) => item.trim().replace(/\.\s*(\[#\d+\])?$/, (_, cite: string | undefined) => (cite ? ` ${cite}` : "")))
+    .join("; ");
+}
+
+/**
+ * Prose that verification (or quote checking) removed is rebuilt from what survived,
+ * so the report never shows an empty summary or a score without a reason. A
+ * competency the model didn't score is dropped (the scorecard lists scores).
+ */
+export function fillMissingProse(report: ReadyReport): ReadyReport {
+  const competencies = report.competency_scores
+    .filter((c) => c.score !== null)
+    .map((c) => {
+      if (c.rationale.trim()) return c;
+      const parts = [
+        c.positive_signals.length ? `Strong: ${joinItems(c.positive_signals, 2)}.` : "",
+        c.negative_signals.length ? `To improve: ${joinItems(c.negative_signals, 2)}.` : "",
+      ].filter(Boolean);
+      if (!parts.length && c.evidence.length) parts.push(`Based on: ${joinItems(c.evidence, 2)}.`);
+      if (!parts.length) return { ...c, rationale: "Scored from your answers as a whole; no single moment stood out." };
+      return { ...c, rationale: parts.join(" ") };
+    });
+  let summary = report.summary;
+  if (!summary.trim()) {
+    summary = [
+      report.strengths.length ? `Strongest moment: ${joinItems(report.strengths, 1)}.` : "",
+      report.improvements.length ? `Main thing to work on next: ${joinItems(report.improvements, 1)}.` : "",
+    ]
+      .filter(Boolean)
+      .join(" ");
+  }
+  return { ...report, summary, competency_scores: competencies };
+}
+
 export function finalizeReport(draft: ReadyReport, rawScore: unknown, ctx: ReportContext): ReadyReport {
-  draft = ensureHandsOn(draft, ctx.exerciseHappened, ctx.workSubmitted);
+  draft = fillMissingProse(ensureHandsOn(draft, ctx.exerciseHappened, ctx.workSubmitted));
   const limited = ctx.facts.limitedEvidence;
   const thin = ctx.facts.thinEvidence;
   let report: ReadyReport = {
