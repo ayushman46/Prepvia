@@ -129,6 +129,8 @@ class FakePc {
   localDescription: { type?: string; sdp?: string } | null = null;
   remoteDescription: { type?: string; sdp?: string } | null = null;
   ontrack: ((event: RemoteEvent) => void) | null = null;
+  connectionState = "new";
+  onconnectionstatechange: (() => void) | null = null;
   closed = false;
   addedTracks: FakeTrack[] = [];
 
@@ -256,6 +258,22 @@ describe("openAecLoopback", () => {
     expect(FakePc.instances.every((pc) => pc.closed)).toBe(true);
   });
 
+  it("reports a lost loopback once, and not for its own teardown", async () => {
+    const env = makeEnv();
+    let lost = 0;
+    const handle = await openAecLoopback({ ...env.options, onLost: () => (lost += 1) });
+    const [, receiver] = FakePc.instances as (FakePc & { connectionState?: string })[];
+
+    receiver.connectionState = "failed";
+    receiver.onconnectionstatechange?.();
+    (handle.track as unknown as { onended: () => void }).onended();
+    expect(lost).toBe(1);
+
+    const quiet = await openAecLoopback({ ...env.options, onLost: () => (lost += 1) });
+    quiet.dispose();
+    expect(lost).toBe(1);
+  });
+
   it("rejects without creating peers when the context has no stream destination", async () => {
     const env = makeEnv({ noDestination: true });
     await expect(openAecLoopback(env.options)).rejects.toThrow(/no destination/);
@@ -340,6 +358,22 @@ describe("SequencedAudioPlayer output routing", () => {
     player.dispose();
     expect(FakePc.instances.every((pc) => pc.closed)).toBe(true);
     expect(win.__aecPath).toBeUndefined();
+  });
+
+  it("moves playback back to the direct route when the loopback drops mid-session", async () => {
+    const win = stubBrowser(CHROME_UA, true);
+    const player = new SequencedAudioPlayer({ onSpeakingChange: () => undefined });
+    await player.unlock();
+    const context = FakeAudioContext.last as FakeAudioContext;
+    expect(win.__aecPath).toBe("loopback");
+
+    const receiver = FakePc.instances[1] as FakePc & { connectionState?: string };
+    receiver.connectionState = "failed";
+    receiver.onconnectionstatechange?.();
+
+    expect(win.__aecPath).toBe("direct");
+    expect(context.analyser.outputs).toEqual([context.destination]);
+    player.dispose();
   });
 
   it("falls back to the direct route when the loopback cannot be built", async () => {

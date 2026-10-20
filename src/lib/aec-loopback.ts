@@ -109,6 +109,8 @@ export interface AecLoopbackOptions {
   doc?: Document;
   createPeerConnection?: () => RTCPeerConnection;
   createStream?: (tracks: MediaStreamTrack[]) => MediaStream;
+  /** Called once if the live loopback later fails or ends (e.g. the local network changes). */
+  onLost?: () => void;
 }
 
 /**
@@ -171,6 +173,17 @@ export async function openAecLoopback(options: AecLoopbackOptions): Promise<AecL
       "loopback negotiation",
     );
     if (received.readyState !== "live") throw new Error("loopback: receiver track is not live");
+    // Watch for a dead loopback so playback can fall back to the direct route, never silence.
+    let lostReported = false;
+    const reportLost = () => {
+      if (disposed || lostReported) return;
+      lostReported = true;
+      options.onLost?.();
+    };
+    received.onended = reportLost;
+    rx.onconnectionstatechange = () => {
+      if (rx.connectionState === "failed" || rx.connectionState === "closed") reportLost();
+    };
 
     const element = doc.createElement("audio");
     audio = element;

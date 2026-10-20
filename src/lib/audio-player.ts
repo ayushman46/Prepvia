@@ -192,7 +192,9 @@ export class SequencedAudioPlayer {
    */
   private async chooseOutputRoute(context: AudioContext, analyser: AnalyserNode): Promise<void> {
     const chromium = isChromiumBrowser(typeof navigator === "undefined" ? undefined : navigator);
-    const loopback = chromium ? await openAecLoopback({ context }).catch(() => null) : null;
+    const loopback = chromium
+      ? await openAecLoopback({ context, onLost: () => this.abandonLoopback(context, analyser) }).catch(() => null)
+      : null;
     // Disposed or replaced while the handshake was running: release what we just built.
     if (this.context !== context) {
       loopback?.dispose();
@@ -222,6 +224,20 @@ export class SequencedAudioPlayer {
       analyser.connect(context.destination);
     }
     window.__aecPath = path;
+  }
+
+  /** The loopback died mid-session: move the interviewer's voice back to the direct route. */
+  private abandonLoopback(context: AudioContext, analyser: AnalyserNode): void {
+    if (this.context !== context || !this.loopback) return;
+    this.loopback.dispose();
+    this.loopback = null;
+    try {
+      analyser.disconnect();
+    } catch {
+      // nothing connected
+    }
+    analyser.connect(context.destination);
+    window.__aecPath = "direct";
   }
 
   private stopPlayback(): void {
