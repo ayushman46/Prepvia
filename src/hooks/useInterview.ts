@@ -878,6 +878,8 @@ export function useInterview(sessionId: string) {
   }, [revealRemaining]);
 
   const getOutputLevel = useCallback(() => playerRef.current?.getLevel() ?? 0, []);
+  /** Whether Aria's current audio can be measured (false for the browser's built-in voice). */
+  const isOutputMeasurable = useCallback(() => playerRef.current?.outputMeasurable ?? true, []);
 
   // After a barge-in the floor belongs to the candidate, even while the old turn finishes.
   // Audible speech wins over "processing": the reply often starts playing while the
@@ -902,6 +904,7 @@ export function useInterview(sessionId: string) {
     updateCanvas,
     flushCanvas,
     getOutputLevel,
+    isOutputMeasurable,
     reload: () => load(),
   };
 }

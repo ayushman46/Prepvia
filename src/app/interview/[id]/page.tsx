@@ -260,7 +260,10 @@ function InterviewRoom() {
         // only, and never during her goodbye: "thank you" must not cut the closing short). Echo-aware:
         // Aria's own voice reaches the mic, so a frame must clearly exceed her predicted echo.
         // Every frame feeds the echo model, so it is learned even while she is not speaking.
-        const armed = allowInterrupt && captureMode === "auto" && turnStatus === "speaking" && !limitReached;
+        // Voice barge-in needs a measured echo estimate. The browser's built-in voice can't be
+        // measured, so there it stays off: the Interrupt button and Space still work.
+        const armed =
+          allowInterrupt && captureMode === "auto" && turnStatus === "speaking" && !limitReached && interview.isOutputMeasurable();
         const outputRms = outputLevelToRms(interview.getOutputLevel());
         if (bargeIn.current.push({ t: performance.now(), probability, rms, noiseFloor, outputRms }, armed)) {
           if (interview.interrupt({ source: "voice" })) claimFloorRef.current();

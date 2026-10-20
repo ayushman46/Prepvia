@@ -95,6 +95,15 @@ export class SequencedAudioPlayer {
   }
 
   /** Current output level 0..1 (RMS), for visualisation. */
+  /**
+   * False while the browser's built-in voice is speaking: that audio never passes through
+   * the Web Audio graph, so there is no measured output level (getLevel() is only a
+   * visual animation then) and no echo estimate for barge-in.
+   */
+  get outputMeasurable(): boolean {
+    return !this.browserSpeaking;
+  }
+
   getLevel(): number {
     if (this.browserSpeaking) return 0.35 + 0.15 * Math.sin(performance.now() / 120);
     if (!this.analyser || !this.levelBuffer || !this.playing) return 0;
