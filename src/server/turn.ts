@@ -191,24 +191,27 @@ function echoedLead(said: string[], ai: string[]): number {
  * as placed but at most `budget` of them may be near. Words may be left out of `said`.
  */
 function placedWords(said: string[], ai: string[], budget: number): number {
-  const width = budget + 1;
+  // A near word uses up an interviewer word, so no more than ai.length of them can occur.
+  const near = Math.min(budget, ai.length);
+  const width = near + 1;
   const cols = ai.length + 1;
   let previous = new Int32Array(cols * width);
+  let row = new Int32Array(cols * width);
   for (let i = 1; i <= said.length; i++) {
-    const row = new Int32Array(cols * width);
+    row.fill(0);
     for (let j = 1; j <= ai.length; j++) {
       const exact = said[i - 1] === ai[j - 1];
-      const near = !exact && nearWord(said[i - 1], ai[j - 1]);
+      const fuzzy = !exact && nearWord(said[i - 1], ai[j - 1]);
       for (let s = 0; s < width; s++) {
         let best = Math.max(row[(j - 1) * width + s], previous[j * width + s]);
         if (exact) best = Math.max(best, previous[(j - 1) * width + s] + 1);
-        else if (near && s > 0) best = Math.max(best, previous[(j - 1) * width + s - 1] + 1);
+        else if (fuzzy && s > 0) best = Math.max(best, previous[(j - 1) * width + s - 1] + 1);
         row[j * width + s] = best;
       }
     }
-    previous = row;
+    [previous, row] = [row, previous];
   }
-  return previous[ai.length * width + budget];
+  return previous[ai.length * width + near];
 }
 
 /**
@@ -219,6 +222,8 @@ function placedWords(said: string[], ai: string[], budget: number): number {
  */
 function isEchoOf(said: string[], ai: string[]): boolean {
   if (said.length < ECHO_MIN_WORDS) return false;
+  // An echo is no longer than what the interviewer said; longer speech is the candidate's own.
+  if (said.length > 2 * ai.length + ECHO_MIN_WORDS * 2) return false;
   const spoken = new Set(ai);
   if (said.some((word) => FIRST_PERSON.has(word) && !spoken.has(word))) return false;
   const placed = placedWords(said, ai, Math.floor(said.length / 5));
@@ -263,11 +268,14 @@ export function isEcho(userText: string, interviewer: string | string[]): boolea
   return withoutEcho(userText, typeof interviewer === "string" ? [interviewer] : interviewer) === null;
 }
 
-/** The interviewer's most recent messages, newest first. */
+/** The note that sessions.ts appends to a reply the candidate interrupted: words the interviewer never said. */
+const INTERRUPTION_NOTE = /\s*\[interrupted by the candidate[^\]]*\]/g;
+
+/** The interviewer's most recent messages, newest first, as they were spoken. */
 function recentInterviewerMessages(history: TranscriptEntry[], count = 2): string[] {
   const messages: string[] = [];
   for (let i = history.length - 1; i >= 0 && messages.length < count; i--) {
-    if (history[i].role === "ai") messages.push(history[i].content);
+    if (history[i].role === "ai") messages.push(history[i].content.replace(INTERRUPTION_NOTE, ""));
   }
   return messages;
 }

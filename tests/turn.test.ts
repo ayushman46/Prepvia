@@ -918,6 +918,17 @@ describe("runTurn: speaker echo", () => {
     expect(sessionUpdate).toEqual({});
   });
 
+  it("keeps a real answer that restates the question in the candidate's own voice", async () => {
+    store.transcripts = [{ role: "ai", content: question }];
+    providers.tokens.mockImplementation(() => tokens(["Good. What would break first?"]));
+    const { events } = await run({ kind: "text", text: "I would design a rate limiter for the payments API.", voice: true });
+    expect(events.find((e) => e.type === "user_transcript")).toEqual({
+      type: "user_transcript",
+      content: "I would design a rate limiter for the payments API.",
+    });
+    expect(types(events)).not.toContain("no_speech");
+  });
+
   it("checks the echo against the interviewer's last two messages", async () => {
     store.transcripts = [
       { role: "ai", content: question },
