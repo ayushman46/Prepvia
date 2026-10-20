@@ -92,31 +92,184 @@ export function sttErrorEvent(error: SttError): TurnEvent {
 const TOPIC_SHIFT =
   /\b(?:let'?s (?:switch|move|turn|shift|dive|talk|look|go|get|explore|discuss)|switch(?:ing)? gears|moving on|next,? (?:i'?d|let'?s|we|i want)|i'?d (?:now )?like to (?:ask|move|turn|switch|talk|explore|discuss|hear)|another (?:area|topic|question)|is a key part of)\b/i;
 
-const FIRST_PERSON = new Set(["i", "me", "my", "mine", "we", "us", "our", "ours"]);
+/** Fewest words of a repeated run that can be an echo (a shorter match is coincidence). */
+const ECHO_RUN_MIN = 5;
+/** Fewest words of an utterance that can be a pure echo. */
+const ECHO_MIN_WORDS = 4;
+/** Share of an utterance's words that must be placed in order over the interviewer's words to be an echo. */
+const ECHO_OVERLAP = 0.7;
 
 /**
- * True when a transcribed "answer" is mostly the interviewer's own last words played
- * back through the speakers: nearly all of its words, in the same order, and no
- * first-person words of its own. A candidate restating the question ("I would design
- * a rate limiter for the payments API") speaks as "I" and is never discarded.
+ * Words the candidate says about themselves. Contractions are included because speech
+ * recognition writes "I'm" as "Im". An echo never adds one the interviewer did not say.
  */
-export function isEcho(userText: string, lastAi: string): boolean {
-  const words = (text: string) => text.toLowerCase().replace(/[^a-z0-9 ]+/g, " ").split(/\s+/).filter(Boolean);
-  const said = words(userText);
-  const aiWords = words(lastAi);
-  const spoken = new Set(aiWords);
-  if (said.length < 4) return false;
-  if (said.some((word) => FIRST_PERSON.has(word) && !spoken.has(word))) return false;
-  const contained = said.filter((word) => spoken.has(word)).length / said.length;
-  if (contained < 0.85) return false;
-  // Longest common subsequence: an echo keeps the interviewer's word order.
-  let previous = new Array<number>(aiWords.length + 1).fill(0);
-  for (const word of said) {
-    const row = new Array<number>(aiWords.length + 1).fill(0);
-    for (let j = 1; j <= aiWords.length; j++) row[j] = word === aiWords[j - 1] ? previous[j - 1] + 1 : Math.max(previous[j], row[j - 1]);
+const FIRST_PERSON = new Set(["i", "im", "ive", "ill", "id", "me", "my", "mine", "myself", "we", "were", "weve", "us", "our", "ours", "ourselves", "lets"]);
+
+/** A spoken word with the span of the whitespace-delimited token it came from. */
+type SpokenWord = { word: string; start: number; end: number };
+
+/** Lower-case words with apostrophes dropped, so "I'm" and "Im" agree; "trade-offs" is two words. */
+function spokenWords(text: string): SpokenWord[] {
+  const words: SpokenWord[] = [];
+  for (const token of text.matchAll(/\S+/g)) {
+    const start = token.index ?? 0;
+    const end = start + token[0].length;
+    for (const word of token[0].toLowerCase().replace(/['’`]/g, "").split(/[^\p{L}\p{N}]+/u)) {
+      if (word) words.push({ word, start, end });
+    }
+  }
+  return words;
+}
+
+/** Edit distance of at most one: a single substitution, insertion or deletion. */
+function oneEditApart(a: string, b: string): boolean {
+  if (Math.abs(a.length - b.length) > 1) return false;
+  let i = 0;
+  let j = 0;
+  let edits = 0;
+  while (i < a.length && j < b.length) {
+    if (a[i] === b[j]) {
+      i++;
+      j++;
+      continue;
+    }
+    if (++edits > 1) return false;
+    if (a.length > b.length) i++;
+    else if (a.length < b.length) j++;
+    else {
+      i++;
+      j++;
+    }
+  }
+  return edits + (a.length - i) + (b.length - j) <= 1;
+}
+
+/**
+ * The same word, or a slip a recognizer makes on speech: one letter off ("Aria" for
+ * "area"), or a longer word cut short ("interview" for "interviewer").
+ */
+function nearWord(said: string, aiWord: string): boolean {
+  if (said === aiWord) return true;
+  const shorter = Math.min(said.length, aiWord.length);
+  if (shorter < 4) return false;
+  if (shorter >= 6 && (said.startsWith(aiWord) || aiWord.startsWith(said))) return true;
+  return oneEditApart(said, aiWord);
+}
+
+/**
+ * For each length i, the fewest substitutions needed to place said[0..i) in order over
+ * the interviewer's words: interviewer words may be skipped, but no said word may be left
+ * out. Infinity when some word cannot be placed.
+ */
+function substitutionsToPlace(said: string[], ai: string[]): number[] {
+  const costs = [0];
+  let previous = new Array<number>(ai.length + 1).fill(0);
+  for (let i = 1; i <= said.length; i++) {
+    const row = new Array<number>(ai.length + 1).fill(Infinity);
+    for (let j = 1; j <= ai.length; j++) {
+      let best = row[j - 1];
+      if (said[i - 1] === ai[j - 1]) best = Math.min(best, previous[j - 1]);
+      else if (nearWord(said[i - 1], ai[j - 1])) best = Math.min(best, previous[j - 1] + 1);
+      row[j] = best;
+    }
+    costs.push(row[ai.length]);
     previous = row;
   }
-  return previous[aiWords.length] / said.length >= 0.75;
+  return costs;
+}
+
+/** How many leading words repeat the interviewer's words in order, with one substitution per five words. */
+function echoedLead(said: string[], ai: string[]): number {
+  const costs = substitutionsToPlace(said, ai);
+  let lead = 0;
+  for (let i = ECHO_RUN_MIN; i <= said.length; i++) if (costs[i] <= Math.floor(i / 5)) lead = i;
+  return lead;
+}
+
+/**
+ * The most words of `said` that can be placed in order over `ai`, where a near word counts
+ * as placed but at most `budget` of them may be near. Words may be left out of `said`.
+ */
+function placedWords(said: string[], ai: string[], budget: number): number {
+  const width = budget + 1;
+  const cols = ai.length + 1;
+  let previous = new Int32Array(cols * width);
+  for (let i = 1; i <= said.length; i++) {
+    const row = new Int32Array(cols * width);
+    for (let j = 1; j <= ai.length; j++) {
+      const exact = said[i - 1] === ai[j - 1];
+      const near = !exact && nearWord(said[i - 1], ai[j - 1]);
+      for (let s = 0; s < width; s++) {
+        let best = Math.max(row[(j - 1) * width + s], previous[j * width + s]);
+        if (exact) best = Math.max(best, previous[(j - 1) * width + s] + 1);
+        else if (near && s > 0) best = Math.max(best, previous[(j - 1) * width + s - 1] + 1);
+        row[j * width + s] = best;
+      }
+    }
+    previous = row;
+  }
+  return previous[ai.length * width + budget];
+}
+
+/**
+ * True when the words are mostly the interviewer's own: at least 70% placed in order (one
+ * near word per five words at most), at least four of them, and no first-person word the
+ * interviewer never used. A candidate restating the question ("I would design a rate
+ * limiter for the payments API") speaks as "I" and is never discarded.
+ */
+function isEchoOf(said: string[], ai: string[]): boolean {
+  if (said.length < ECHO_MIN_WORDS) return false;
+  const spoken = new Set(ai);
+  if (said.some((word) => FIRST_PERSON.has(word) && !spoken.has(word))) return false;
+  const placed = placedWords(said, ai, Math.floor(said.length / 5));
+  return placed >= ECHO_MIN_WORDS && placed / said.length >= ECHO_OVERLAP;
+}
+
+/**
+ * The candidate's own words in an utterance the microphone may have picked up from the
+ * interviewer, or null when none of it is the candidate's. The interviewer's recent messages
+ * are checked, newest first, because the echo may be of a reply they just superseded:
+ * a run of at least five words that repeats one of them in order (one substitution per five
+ * words) is cut from the start or end. Fewer than three words left means no answer at all.
+ * What remains is an echo when it is mostly the interviewer's own words. Short answers such
+ * as "Yes." are never discarded.
+ */
+export function withoutEcho(userText: string, interviewerTexts: string[]): string | null {
+  const all = spokenWords(userText);
+  if (!all.length) return userText;
+  const references = interviewerTexts.map((text) => spokenWords(text).map((w) => w.word)).filter((ai) => ai.length > 0);
+  const interviewerWords = new Set(references.flat());
+  let words = all;
+  for (const ai of references) {
+    const lead = echoedLead(words.map((w) => w.word), ai);
+    words = words.slice(lead);
+    const tail = echoedLead(words.map((w) => w.word).reverse(), ai.slice().reverse());
+    words = words.slice(0, words.length - tail);
+  }
+  if (words.length < all.length && words.length < 3) {
+    // A question restated in the candidate's own voice ("I would design ... API") leaves only its
+    // first-person word behind: that is an answer, so it is kept whole.
+    if (words.some((w) => FIRST_PERSON.has(w.word) && !interviewerWords.has(w.word))) return userText;
+    return null;
+  }
+  const said = words.map((w) => w.word);
+  if (references.some((ai) => isEchoOf(said, ai))) return null;
+  if (words.length === all.length) return userText;
+  return userText.slice(words[0].start, words[words.length - 1].end);
+}
+
+/** True when the utterance is only the interviewer's own voice picked up by the microphone (see withoutEcho). */
+export function isEcho(userText: string, interviewer: string | string[]): boolean {
+  return withoutEcho(userText, typeof interviewer === "string" ? [interviewer] : interviewer) === null;
+}
+
+/** The interviewer's most recent messages, newest first. */
+function recentInterviewerMessages(history: TranscriptEntry[], count = 2): string[] {
+  const messages: string[] = [];
+  for (let i = history.length - 1; i >= 0 && messages.length < count; i--) {
+    if (history[i].role === "ai") messages.push(history[i].content);
+  }
+  return messages;
 }
 
 function lastInterviewerQuestion(history: TranscriptEntry[]): string {
@@ -405,27 +558,23 @@ export async function runTurn(
       emit({ type: "no_speech" });
       return result;
     }
-    // Speaker echo: the microphone picked up the interviewer's own voice.
-    const recent = await historyPromise;
-    const lastAi = lastInterviewerQuestion(recent);
-    if (lastAi && userText.length >= 20 && isEcho(userText, lastAi)) {
-      logger.warn("Discarded an utterance that echoed the interviewer", undefined, { sessionId });
-      emit({ type: "no_speech" });
-      return result;
-    }
   } else if (input.kind === "text") {
     userText = clip(input.text, LIMITS.answerChars).replace(/\n\[truncated\]$/, "");
   }
 
   const history = await historyPromise;
-  if (input.kind === "text" && input.voice) {
-    // Speculative STT happened in the browser: apply the same speaker-echo filter.
-    const lastAi = lastInterviewerQuestion(history);
-    if (lastAi && userText.length >= 20 && isEcho(userText, lastAi)) {
-      logger.warn("Discarded an utterance that echoed the interviewer", undefined, { sessionId });
+  if (userText && (input.kind === "audio" || (input.kind === "text" && input.voice) || input.amend)) {
+    // The microphone may have picked up the interviewer's own voice (or speech recognition in
+    // the browser did): cut an echoed lead-in or tail, or discard the utterance when only the
+    // echo is left. An echoed continuation is rejected before it can replace the reply.
+    const answer = withoutEcho(userText, recentInterviewerMessages(history));
+    if (answer === null) {
+      logger.warn("Discarded an utterance that echoed the interviewer", undefined, { sessionId, amend: input.amend === true });
       emit({ type: "no_speech" });
       return result;
     }
+    if (answer !== userText) logger.info("Removed an echoed lead-in or tail from an answer", { sessionId });
+    userText = answer;
   }
   const turnCount = session.turn_count ?? history.filter((m) => m.role === "user").length;
 
