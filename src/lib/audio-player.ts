@@ -9,7 +9,12 @@
  * - Playback can be held (e.g. while the opening is prefetched in the lobby) and
  *   interrupted (barge-in), which returns the sentences that were never spoken.
  * - `unlock()` must be called from a user gesture to satisfy autoplay policies.
+ * - On Chromium, output is routed through a local WebRTC loopback so the microphone's
+ *   echo canceller can remove Aria's voice (see ./aec-loopback). Any failure falls back to
+ *   the direct Web Audio route. `window.__aecPath` reports which route is in use.
  */
+
+import { chooseAecPath, isChromiumBrowser, openAecLoopback, type AecLoopback, type AecPath } from "./aec-loopback";
 
 type Item = { text?: string; audio?: ArrayBuffer | null };
 
@@ -46,6 +51,10 @@ export class SequencedAudioPlayer {
   private turnAudioStarted = false;
   /** After an interruption, ignore late audio for that turn until the next one starts. */
   private discarding = false;
+  /** Chromium echo-cancellation loopback, when it is in use. */
+  private loopback: AecLoopback | null = null;
+  /** Resolves once the output route is decided (direct or loopback). */
+  private routeReady: Promise<void> | null = null;
 
   constructor(private readonly callbacks: PlayerCallbacks) {}
 
@@ -54,14 +63,19 @@ export class SequencedAudioPlayer {
     if (typeof window === "undefined") return;
     if (!this.context) {
       const Ctx = window.AudioContext || (window as unknown as { webkitAudioContext: typeof AudioContext }).webkitAudioContext;
-      this.context = new Ctx({ latencyHint: "interactive" });
-      this.analyser = this.context.createAnalyser();
+      const context = new Ctx({ latencyHint: "interactive" });
+      this.context = context;
+      this.analyser = context.createAnalyser();
       this.analyser.fftSize = 512;
       this.analyser.smoothingTimeConstant = 0.6;
-      this.analyser.connect(this.context.destination);
+      this.analyser.connect(context.destination);
       this.levelBuffer = new Uint8Array(new ArrayBuffer(this.analyser.fftSize));
+      this.routeReady = this.chooseOutputRoute(context, this.analyser);
     }
     if (this.context.state === "suspended") await this.context.resume().catch(() => undefined);
+    // Wait for the output route (direct or loopback, bounded to ~1.5 s) so the gesture-initiated
+    // start is routed before the first sentence is released.
+    await this.routeReady;
     // Prime speech synthesis on iOS/Safari, which also requires a gesture.
     if ("speechSynthesis" in window) window.speechSynthesis.getVoices();
   }
@@ -162,9 +176,68 @@ export class SequencedAudioPlayer {
 
   dispose(): void {
     this.stop();
+    this.loopback?.dispose();
+    this.loopback = null;
+    this.routeReady = null;
     void this.context?.close().catch(() => undefined);
     this.context = null;
     this.analyser = null;
+    if (typeof window !== "undefined") delete window.__aecPath;
+  }
+
+  /**
+   * Chromium: send the analyser output through the AEC loopback so the mic's echo canceller
+   * can see it. Otherwise (or if the loopback is not live): analyser -> speakers, directly.
+   * Never throws; the direct route is always restored on failure.
+   */
+  private async chooseOutputRoute(context: AudioContext, analyser: AnalyserNode): Promise<void> {
+    const chromium = isChromiumBrowser(typeof navigator === "undefined" ? undefined : navigator);
+    const loopback = chromium
+      ? await openAecLoopback({ context, onLost: () => this.abandonLoopback(context, analyser) }).catch(() => null)
+      : null;
+    // Disposed or replaced while the handshake was running: release what we just built.
+    if (this.context !== context) {
+      loopback?.dispose();
+      return;
+    }
+    let path: AecPath = chooseAecPath({
+      chromium,
+      failed: chromium && loopback === null,
+      trackLive: loopback?.track.readyState === "live",
+    });
+    if (path === "loopback" && loopback) {
+      try {
+        analyser.disconnect();
+        analyser.connect(loopback.sink);
+        this.loopback = loopback;
+      } catch {
+        path = "direct";
+      }
+    }
+    if (path === "direct") {
+      loopback?.dispose();
+      try {
+        analyser.disconnect();
+      } catch {
+        // nothing connected
+      }
+      analyser.connect(context.destination);
+    }
+    window.__aecPath = path;
+  }
+
+  /** The loopback died mid-session: move the interviewer's voice back to the direct route. */
+  private abandonLoopback(context: AudioContext, analyser: AnalyserNode): void {
+    if (this.context !== context || !this.loopback) return;
+    this.loopback.dispose();
+    this.loopback = null;
+    try {
+      analyser.disconnect();
+    } catch {
+      // nothing connected
+    }
+    analyser.connect(context.destination);
+    window.__aecPath = "direct";
   }
 
   private stopPlayback(): void {
