@@ -263,7 +263,7 @@ function InterviewRoom() {
         const armed = allowInterrupt && captureMode === "auto" && turnStatus === "speaking" && !limitReached;
         const outputRms = outputLevelToRms(interview.getOutputLevel());
         if (bargeIn.current.push({ t: performance.now(), probability, rms, noiseFloor, outputRms }, armed)) {
-          if (interview.interrupt()) claimFloorRef.current();
+          if (interview.interrupt({ source: "voice" })) claimFloorRef.current();
         }
       },
     }),
