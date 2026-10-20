@@ -1,4 +1,4 @@
-import { beforeEach, describe, expect, it } from "vitest";
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import {
   chooseAecPath,
   isChromiumBrowser,
@@ -6,6 +6,7 @@ import {
   openAecLoopback,
   OPUS_MAX_AVERAGE_BITRATE,
 } from "@/lib/aec-loopback";
+import { SequencedAudioPlayer } from "@/lib/audio-player";
 
 const CHROME_UA =
   "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/126.0.0.0 Safari/537.36";
@@ -259,5 +260,108 @@ describe("openAecLoopback", () => {
     const env = makeEnv({ noDestination: true });
     await expect(openAecLoopback(env.options)).rejects.toThrow(/no destination/);
     expect(FakePc.instances).toHaveLength(0);
+  });
+});
+
+class FakeAnalyser {
+  fftSize = 0;
+  smoothingTimeConstant = 0;
+  outputs: unknown[] = [];
+  connect(node: unknown): void {
+    this.outputs.push(node);
+  }
+  disconnect(): void {
+    this.outputs = [];
+  }
+}
+
+class FakeAudioContext {
+  static last: FakeAudioContext | null = null;
+  state = "running";
+  destination = { kind: "destination" };
+  sink = { kind: "sink", channelCount: 2, stream: { getAudioTracks: () => [new FakeTrack()] } };
+  analyser = new FakeAnalyser();
+  constructor() {
+    FakeAudioContext.last = this;
+  }
+  createAnalyser(): FakeAnalyser {
+    return this.analyser;
+  }
+  createMediaStreamDestination(): unknown {
+    return this.sink;
+  }
+  resume(): Promise<void> {
+    return Promise.resolve();
+  }
+  close(): Promise<void> {
+    return Promise.resolve();
+  }
+}
+
+class StubPc extends FakePc {
+  constructor() {
+    super(false);
+  }
+}
+
+describe("SequencedAudioPlayer output routing", () => {
+  afterEach(() => {
+    vi.unstubAllGlobals();
+    FakePc.instances = [];
+    FakeAudioContext.last = null;
+  });
+
+  function stubBrowser(userAgent: string, peerConnections: boolean) {
+    const win: { AudioContext: typeof FakeAudioContext; __aecPath?: string } = { AudioContext: FakeAudioContext };
+    const doc = { createElement: () => new FakeAudio("ok"), body: { appendChild: () => undefined } };
+    vi.stubGlobal("window", win);
+    vi.stubGlobal("navigator", { userAgent });
+    vi.stubGlobal("document", doc);
+    vi.stubGlobal(
+      "MediaStream",
+      class {
+        constructor(public tracks: unknown[]) {}
+      },
+    );
+    vi.stubGlobal("RTCPeerConnection", peerConnections ? StubPc : undefined);
+    return win;
+  }
+
+  it("routes Chromium output through the loopback and reports it", async () => {
+    const win = stubBrowser(CHROME_UA, true);
+    const player = new SequencedAudioPlayer({ onSpeakingChange: () => undefined });
+    await player.unlock();
+    const context = FakeAudioContext.last as FakeAudioContext;
+
+    expect(win.__aecPath).toBe("loopback");
+    expect(context.analyser.outputs).toEqual([context.sink]);
+    expect(FakePc.instances).toHaveLength(2);
+
+    player.dispose();
+    expect(FakePc.instances.every((pc) => pc.closed)).toBe(true);
+    expect(win.__aecPath).toBeUndefined();
+  });
+
+  it("falls back to the direct route when the loopback cannot be built", async () => {
+    const win = stubBrowser(CHROME_UA, false);
+    const player = new SequencedAudioPlayer({ onSpeakingChange: () => undefined });
+    await player.unlock();
+    const context = FakeAudioContext.last as FakeAudioContext;
+
+    expect(win.__aecPath).toBe("direct");
+    expect(context.analyser.outputs).toEqual([context.destination]);
+    player.dispose();
+  });
+
+  it("keeps the direct route on non-Chromium browsers without touching WebRTC", async () => {
+    const win = stubBrowser(SAFARI_UA, true);
+    const player = new SequencedAudioPlayer({ onSpeakingChange: () => undefined });
+    await player.unlock();
+    const context = FakeAudioContext.last as FakeAudioContext;
+
+    expect(win.__aecPath).toBe("direct");
+    expect(context.analyser.outputs).toEqual([context.destination]);
+    expect(FakePc.instances).toHaveLength(0);
+    player.dispose();
   });
 });
