@@ -219,6 +219,8 @@ type AnswerTurn = {
   audibleAt?: number;
   /** The candidate cut the reply off right after it started: they were still answering. */
   falseStart?: boolean;
+  /** This answer was itself sent as an amendment; it can never be false-started (no chains). */
+  amended?: boolean;
   superseded: boolean;
 };
 
@@ -226,9 +228,42 @@ type AnswerTurn = {
  * Interrupting Aria this soon after her reply starts (her opening acknowledgement,
  * including the ~0.3 s barge-in detection) means the candidate hadn't finished.
  */
-const FALSE_START_MS = 2_000;
+export const FALSE_START_MS = 1_500;
 /** A sound that hasn't turned into close speech by then doesn't hold Aria's reply. */
 const ONSET_HOLD_MS = 400;
+
+/** Who interrupted Aria: the candidate's voice (barge-in) or a deliberate press (Space, Interrupt). */
+export type InterruptSource = "voice" | "manual";
+
+/**
+ * Was this interruption a false start? Only the candidate's voice counts (a deliberate
+ * press is not a sign they were still answering), only soon after her reply became
+ * audible, and never for an answer that was itself sent as an amendment: otherwise her
+ * own echo cutting her off would keep replacing her replies in a loop.
+ */
+export function isFalseStart(input: { source: InterruptSource; audibleAt?: number; now: number; amended: boolean }): boolean {
+  if (input.source !== "voice" || input.amended || input.audibleAt === undefined) return false;
+  const elapsed = input.now - input.audibleAt;
+  return Number.isFinite(elapsed) && elapsed >= 0 && elapsed < FALSE_START_MS;
+}
+
+/**
+ * May the candidate's utterance amend the last answer (replacing Aria's reply to it)
+ * instead of starting a new answer? Yes before her reply was heard, or after a false
+ * start. Never while she is audibly speaking: an amendment must not cut her off.
+ */
+export function canAmendLastAnswer(state: {
+  hasAnswer: boolean;
+  started: boolean;
+  limitReached: boolean;
+  audible: boolean;
+  falseStart: boolean;
+  /** Aria is audibly speaking right now (her audio is playing). */
+  playingAudibly: boolean;
+}): boolean {
+  if (!state.hasAnswer || !state.started || state.limitReached || state.playingAudibly) return false;
+  return !state.audible || state.falseStart;
+}
 
 type QueuedTurn = { payload: TurnPayload; options: { inputAt?: number }; extraAudio: Blob[] };
 
@@ -250,6 +285,8 @@ export function useInterview(sessionId: string) {
   const canvasRef = useRef({ content: "", language: "text", dirty: false, timer: null as ReturnType<typeof setTimeout> | null });
   const pendingTurnRef = useRef<QueuedTurn | null>(null);
   const answerTurnRef = useRef<AnswerTurn | null>(null);
+  /** Synchronous mirror of "Aria's audio is playing" (the player reports every change at once). */
+  const audiblyPlayingRef = useRef(false);
   const candidateHoldRef = useRef(false);
   const onsetTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
   /** An answer whose turn failed before the server saved it: Retry sends it again. */
@@ -335,7 +372,10 @@ export function useInterview(sessionId: string) {
     const controller = new AbortController();
     const latency = latencyRef.current;
     const player = new SequencedAudioPlayer({
-      onSpeakingChange: (speaking) => dispatch({ type: "speaking", value: speaking }),
+      onSpeakingChange: (speaking) => {
+        audiblyPlayingRef.current = speaking;
+        dispatch({ type: "speaking", value: speaking });
+      },
       onSentenceStart: (seq, text) => revealSentence(seq, text),
       onTurnAudioStart: (playerTurn, at) => {
         const answer = answerTurnRef.current;
@@ -455,7 +495,8 @@ export function useInterview(sessionId: string) {
       const input: TurnLatency["input"] = "audio" in payload ? "audio" : "text" in payload ? "text" : "continue";
       // This becomes the answer a continuation would amend (restored if it never reaches the server).
       const previousAnswer = answerTurnRef.current;
-      const answerTurn: AnswerTurn | null = input !== "continue" ? { turn, aiStarted: false, audible: false, superseded: false } : null;
+      const answerTurn: AnswerTurn | null =
+        input !== "continue" ? { turn, aiStarted: false, audible: false, superseded: false, amended: !!payload.amend } : null;
       if (answerTurn) answerTurnRef.current = answerTurn;
       const superseded = () => !!answerTurn?.superseded;
       if ("audio" in payload && payload.transcript) {
@@ -685,8 +726,12 @@ export function useInterview(sessionId: string) {
     if (prefetchRef.current === "failed") void sendTurn({ continue: true });
   }, [sessionId, sendTurn]);
 
-  /** Barge-in: the candidate started talking over the interviewer. */
-  const interrupt = useCallback(() => {
+  /**
+   * The candidate cut Aria off. `source: "voice"` is barge-in (her echo can trigger it, so
+   * it may count as a false start); the default "manual" is Space, the Interrupt button,
+   * push-to-talk or a typed answer, which never counts as one.
+   */
+  const interrupt = useCallback((options: { source?: InterruptSource } = {}) => {
     const player = playerRef.current;
     if (!player || !stateRef.current.speaking) return false;
     player.interrupt();
@@ -703,7 +748,12 @@ export function useInterview(sessionId: string) {
     revealRemaining(true);
     if (aiTurnRef.current) aiTurnRef.current.interrupted = true;
     const answer = answerTurnRef.current;
-    if (answer?.audibleAt !== undefined && performance.now() - answer.audibleAt < FALSE_START_MS) answer.falseStart = true;
+    if (
+      answer &&
+      isFalseStart({ source: options.source ?? "manual", audibleAt: answer.audibleAt, now: performance.now(), amended: !!answer.amended })
+    ) {
+      answer.falseStart = true;
+    }
     dispatch({ type: "speaking", value: false });
     dispatch({ type: "interrupted", value: true });
     for (const record of latencyRef.current.values()) {
@@ -766,7 +816,19 @@ export function useInterview(sessionId: string) {
   const amend = useCallback(
     (audio: Blob, endedAt: number, transcript?: Promise<SpeculativeTranscript | null>): boolean => {
       const answer = answerTurnRef.current;
-      if (!answer || (answer.audible && !answer.falseStart) || stateRef.current.limitReached || !stateRef.current.started) return false;
+      if (
+        !answer ||
+        !canAmendLastAnswer({
+          hasAnswer: true,
+          started: stateRef.current.started,
+          limitReached: stateRef.current.limitReached,
+          audible: answer.audible,
+          falseStart: !!answer.falseStart,
+          playingAudibly: audiblyPlayingRef.current,
+        })
+      ) {
+        return false;
+      }
       if (!answer.superseded) {
         answer.superseded = true;
         playerRef.current?.interrupt();
