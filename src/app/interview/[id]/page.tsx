@@ -15,7 +15,7 @@ import { cn } from "@/lib/cn";
 import { LIMITS } from "@/lib/protocol";
 import { classifyEndpoint, type EndpointKind } from "@/lib/endpointing";
 import { encodeWav } from "@/lib/wav";
-import { BARGE_IN_DEFAULTS, isBargeInFrame, outputLevelToRms } from "@/lib/barge-in";
+import { EchoAwareBargeIn, outputLevelToRms } from "@/lib/barge-in";
 import { MicCheck } from "@/components/MicCheck";
 
 const SECTION_LABELS: Record<string, string> = {
@@ -28,14 +28,6 @@ const SECTION_LABELS: Record<string, string> = {
   closing: "Closing",
 };
 
-/**
- * Barge-in detector: of the last BARGE_IN_WINDOW frames (~32 ms each), at least
- * BARGE_IN_FRAMES must be confident speech. A sliding window tolerates the brief
- * dips between words that reset a strict "consecutive frames" counter.
- */
-const BARGE_IN_WINDOW = 10;
-const BARGE_IN_FRAMES = 7;
-const BARGE_IN_PROBABILITY = 0.7;
 /** Background-noise events (ignored sounds, empty transcripts) within a minute before suggesting push-to-talk. */
 const NOISY_ROOM_EVENTS = 4;
 const CAPTURE_MODE_KEY = "interviewai:capture-mode";
@@ -94,7 +86,8 @@ function InterviewRoom() {
   const [mobileTab, setMobileTab] = useState<"interview" | "canvas">("interview");
   const [now, setNow] = useState(() => Date.now());
   const micLevel = useRef(0);
-  const bargeWindow = useRef<boolean[]>([]);
+  /** Echo model and barge-in window for this interview (remounts with the page). */
+  const bargeIn = useRef(new EchoAwareBargeIn());
   /** Speculative transcripts started during the candidate's pauses, by tracker id. */
   const speculations = useRef(new Map<number, { promise: Promise<SpeculativeTranscript | null>; controller: AbortController }>());
   /** After a 429 from /transcribe, skip speculation until then (performance.now()). */
@@ -263,20 +256,14 @@ function InterviewRoom() {
           (w.__vadProbs ??= []).push({ t: performance.now(), p: probability, rms, floor: noiseFloor });
           if (w.__vadProbs.length > 3_000) w.__vadProbs.splice(0, 1_000);
         }
-        // Barge-in: sustained, confident speech while the interviewer is talking (hands-free mode
-        // only, and never during her goodbye: "thank you" must not cut the closing short).
-        if (allowInterrupt && captureMode === "auto" && turnStatus === "speaking" && !limitReached) {
-          const recent = bargeWindow.current;
-          // Confident (p >= 0.7) or moderate-but-loud voice that is clearly above Aria's own echo.
-          const outputRms = outputLevelToRms(interview.getOutputLevel());
-          recent.push(isBargeInFrame({ probability, rms, noiseFloor, outputRms }, { ...BARGE_IN_DEFAULTS, confident: BARGE_IN_PROBABILITY }));
-          if (recent.length > BARGE_IN_WINDOW) recent.shift();
-          if (recent.filter(Boolean).length >= BARGE_IN_FRAMES) {
-            bargeWindow.current = [];
-            if (interview.interrupt()) claimFloorRef.current();
-          }
-        } else if (bargeWindow.current.length) {
-          bargeWindow.current = [];
+        // Barge-in: sustained candidate speech while the interviewer is talking (hands-free mode
+        // only, and never during her goodbye: "thank you" must not cut the closing short). Echo-aware:
+        // Aria's own voice reaches the mic, so a frame must clearly exceed her predicted echo.
+        // Every frame feeds the echo model, so it is learned even while she is not speaking.
+        const armed = allowInterrupt && captureMode === "auto" && turnStatus === "speaking" && !limitReached;
+        const outputRms = outputLevelToRms(interview.getOutputLevel());
+        if (bargeIn.current.push({ t: performance.now(), probability, rms, noiseFloor, outputRms }, armed)) {
+          if (interview.interrupt()) claimFloorRef.current();
         }
       },
     }),
