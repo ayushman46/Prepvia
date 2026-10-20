@@ -796,9 +796,10 @@ describe("runTurn: ending and premature wrap-up", () => {
   });
 });
 
-describe("isEcho", () => {
-  const question = "How would you design a rate limiter for the payments API, and what trade-offs would you consider?";
+const greeting = "Hi, I'm Aria, and I'll be your interviewer today.";
+const question = "How would you design a rate limiter for the payments API, and what trade-offs would you consider?";
 
+describe("isEcho", () => {
   it("discards the interviewer's own words picked up by the microphone", async () => {
     const { isEcho } = await import("@/server/turn");
     expect(isEcho("how would you design a rate limiter for the payments API", question)).toBe(true);
@@ -811,6 +812,132 @@ describe("isEcho", () => {
     expect(isEcho("We would consider the trade-offs for the payments API.", question)).toBe(false);
     expect(isEcho("Design a token bucket rate limiter per merchant in Redis.", question)).toBe(false);
     expect(isEcho("Yes, the payments API.", question)).toBe(false);
+  });
+
+  it("discards Whisper transcripts of the interviewer's words that carry recognition errors", async () => {
+    const { isEcho } = await import("@/server/turn");
+    expect(isEcho("Im Aria and Ill be your interview today", greeting)).toBe(true);
+    expect(isEcho("Hi I'm area and I'll be your interview today", greeting)).toBe(true);
+    expect(isEcho("how would you desgn a rate limiter for the payments API and what trade offs would you consider", question)).toBe(true);
+  });
+
+  it("checks the interviewer's last two messages, since the echo may be of the reply just superseded", async () => {
+    const { isEcho } = await import("@/server/turn");
+    const spoken = "design a rate limiter for the payments API and what trade-offs would you consider";
+    expect(isEcho(spoken, [greeting, question])).toBe(true);
+    expect(isEcho(spoken, [greeting])).toBe(false);
+  });
+
+  it("keeps short answers", async () => {
+    const { isEcho } = await import("@/server/turn");
+    expect(isEcho("Yes.", question)).toBe(false);
+    expect(isEcho("Yes, the payments API.", question)).toBe(false);
+    expect(isEcho("Hi, I'm Aria.", greeting)).toBe(false);
+  });
+});
+
+describe("withoutEcho", () => {
+  it("cuts an echoed lead-in and keeps the candidate's own answer as spoken", async () => {
+    const { withoutEcho } = await import("@/server/turn");
+    expect(withoutEcho("Im Aria and Ill be your interviewer today. I built a payments ledger on Postgres.", [greeting])).toBe(
+      "I built a payments ledger on Postgres.",
+    );
+  });
+
+  it("cuts an echoed tail and keeps the answer before it", async () => {
+    const { withoutEcho } = await import("@/server/turn");
+    expect(withoutEcho("We use token buckets per merchant. And what trade-offs would you consider?", [question])).toBe(
+      "We use token buckets per merchant.",
+    );
+  });
+
+  it("keeps a question restated in the candidate's own voice", async () => {
+    const { withoutEcho } = await import("@/server/turn");
+    const restated = "I would design a rate limiter for the payments API, and I would weigh the trade-offs.";
+    expect(withoutEcho(restated, [question])).toBe(restated);
+    expect(withoutEcho("I would design a rate limiter for the payments API.", [question])).toBe("I would design a rate limiter for the payments API.");
+  });
+
+  it("discards an utterance that is only the echo, or is left with fewer than three words", async () => {
+    const { withoutEcho } = await import("@/server/turn");
+    expect(withoutEcho("Hi, I'm Aria, and I'll be your interviewer today.", [greeting])).toBeNull();
+    expect(withoutEcho("Im Aria and Ill be your interviewer today so yes", [greeting])).toBeNull();
+  });
+
+  it("keeps a three-word answer that follows an echoed lead-in", async () => {
+    const { withoutEcho } = await import("@/server/turn");
+    expect(withoutEcho("Im Aria and Ill be your interviewer today. Token buckets rule.", [greeting])).toBe("Token buckets rule.");
+  });
+
+  it("keeps short answers unchanged", async () => {
+    const { withoutEcho } = await import("@/server/turn");
+    expect(withoutEcho("Yes.", [question])).toBe("Yes.");
+    expect(withoutEcho("Yes, the payments API.", [question])).toBe("Yes, the payments API.");
+  });
+});
+
+describe("runTurn: speaker echo", () => {
+  it("discards a Whisper transcript of the interviewer's voice without an AI turn", async () => {
+    store.transcripts = [{ role: "ai", content: greeting }];
+    providers.transcribe.mockResolvedValue("Im Aria and Ill be your interview today");
+    const { events } = await run({ kind: "audio", audio: new Uint8Array(100) });
+    expect(types(events)).toEqual(["no_speech"]);
+    expect(providers.tokens).not.toHaveBeenCalled();
+    expect(store.transcripts).toEqual([{ role: "ai", content: greeting }]);
+  });
+
+  it("keeps the candidate's answer after an echoed lead-in", async () => {
+    store.transcripts = [{ role: "ai", content: greeting }];
+    providers.tokens.mockImplementation(() => tokens(["Great to meet you. What did you build?"]));
+    const { events } = await run({
+      kind: "text",
+      text: "Im Aria and Ill be your interviewer today. I built a payments ledger on Postgres.",
+      voice: true,
+    });
+    const answer = "I built a payments ledger on Postgres.";
+    expect(events.find((e) => e.type === "user_transcript")).toEqual({ type: "user_transcript", content: answer });
+    expect(store.transcripts[1]).toEqual({ role: "user", content: answer });
+    expect(types(events)).not.toContain("no_speech");
+  });
+
+  it("does not let an echoed continuation replace the reply the candidate has not heard", async () => {
+    const unheard = "Got it. How did the team handle migrations?";
+    const before: { role: "user" | "ai"; content: string }[] = [
+      { role: "ai", content: "Why did you choose Postgres?" },
+      { role: "user", content: "I chose Postgres because we needed transactions." },
+      { role: "ai", content: unheard },
+    ];
+    store.transcripts = before.map((t) => ({ ...t }));
+    const { events, sessionUpdate } = await run(
+      { kind: "text", text: "how did the team handle migrations", voice: true, amend: true },
+      inProgress(6, { turn_count: 3 }),
+    );
+    expect(types(events)).toEqual(["no_speech"]);
+    expect(store.transcripts).toEqual(before);
+    expect(providers.tokens).not.toHaveBeenCalled();
+    expect(sessionUpdate).toEqual({});
+  });
+
+  it("keeps a real answer that restates the question in the candidate's own voice", async () => {
+    store.transcripts = [{ role: "ai", content: question }];
+    providers.tokens.mockImplementation(() => tokens(["Good. What would break first?"]));
+    const { events } = await run({ kind: "text", text: "I would design a rate limiter for the payments API.", voice: true });
+    expect(events.find((e) => e.type === "user_transcript")).toEqual({
+      type: "user_transcript",
+      content: "I would design a rate limiter for the payments API.",
+    });
+    expect(types(events)).not.toContain("no_speech");
+  });
+
+  it("checks the echo against the interviewer's last two messages", async () => {
+    store.transcripts = [
+      { role: "ai", content: question },
+      { role: "user", content: "I would use a token bucket." },
+      { role: "ai", content: "Thanks. Tell me about a ledger migration you ran." },
+    ];
+    const { events } = await run({ kind: "text", text: "how would you design a rate limiter for the payments API and what trade-offs would you consider", voice: true });
+    expect(types(events)).toEqual(["no_speech"]);
+    expect(providers.tokens).not.toHaveBeenCalled();
   });
 });
 
