@@ -187,7 +187,11 @@ await step("opening turn streams greeting text, MP3 audio and metrics without st
   for (const a of audio) {
     const bytes = Buffer.from(a.data, "base64");
     assert.ok(bytes.length > 2000);
-    assert.ok(bytes[0] === 0xff || bytes.subarray(0, 3).toString() === "ID3", "mp3 frame header");
+    // Edge sends MP3. The local stand-in (TTS_WSS_URL, tests/e2e/fake-edge-tts.mjs) sends AAC in an MP4
+    // container, which the browser decodes the same way; anything else is a real failure.
+    const mp3 = bytes[0] === 0xff || bytes.subarray(0, 3).toString() === "ID3";
+    const mp4 = bytes.subarray(4, 8).toString() === "ftyp";
+    assert.ok(mp3 || (process.env.TTS_WSS_URL && mp4), "mp3 frame header");
   }
   const metrics = events.find((e) => e.type === "metrics").metrics;
   assert.equal(metrics.section, "opening");

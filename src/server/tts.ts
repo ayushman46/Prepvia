@@ -9,7 +9,10 @@ import { config } from "./config";
  */
 
 const TRUSTED_CLIENT_TOKEN = "6A5AA1D4EAFF4E9FB37E23D68491D6F4";
-const WSS_URL = `wss://speech.platform.bing.com/consumer/speech/synthesize/readaloud/edge/v1?TrustedClientToken=${TRUSTED_CLIENT_TOKEN}`;
+/** Tests point this at a local stand-in for the service (tests/e2e/fake-edge-tts.mjs); unset in production. */
+const WSS_URL =
+  process.env.TTS_WSS_URL ||
+  `wss://speech.platform.bing.com/consumer/speech/synthesize/readaloud/edge/v1?TrustedClientToken=${TRUSTED_CLIENT_TOKEN}`;
 const CHROMIUM_FULL_VERSION = "143.0.3650.75";
 const CHROMIUM_MAJOR_VERSION = CHROMIUM_FULL_VERSION.split(".")[0];
 const SEC_MS_GEC_VERSION = `1-${CHROMIUM_FULL_VERSION}`;
