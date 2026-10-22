@@ -34,19 +34,25 @@ The goal is not to predict whether someone will get hired. The goal is to give c
 
 ### Personalized Setup
 
-Candidates can upload a PDF resume, enter their name and target role, and paste the job description. The application uses those inputs as grounding material throughout the session.
+Candidates can upload a PDF resume, enter their name and target role, and paste the job description, then choose the interview focus (mixed, technical, or behavioral), seniority (entry, mid, senior), and length (15, 30, or 45 minutes). The application uses those inputs as grounding material throughout the session.
 
 ### Voice-First Practice
 
-The browser uses local Silero voice activity detection to capture natural utterances. Candidates speak instead of typing, hear the interviewer respond, and see a live transcript.
+The browser uses local Silero voice activity detection to capture natural utterances. Candidates speak (typing is available as a fallback), hear the interviewer respond, and see a live transcript. A noise gate ignores clicks, coughs and distant voices; in a noisy room, **push-to-talk** (hold Space or the on-screen button while answering) is one click away, and the room suggests it when it keeps hearing background sound.
 
-### Adaptive Interviewing
+Answers are captured whole. The end of an answer is decided from what was said, not from silence alone: a finished sentence gets a reply after 0.8 s, while a pause after "…and", "um" or "let me think" keeps listening (up to 2.2 s, or 5 s when the candidate asks for time). If the candidate keeps talking after their answer was sent, Aria holds her reply, the continuation is added to the same answer, and she responds to the whole thing. One-word answers ("No.") are heard, answers longer than two minutes are sent in parts instead of being cut, and ending the interview mid-sentence still saves what was said. Speech-to-text is primed with the interview's technical vocabulary (from the role, job description and resume), so terms like "idempotency" and "Postgres" are transcribed correctly. The lobby has a microphone check with a live level meter and a device picker.
 
-Each session keeps compact interview state and evidence memory. The system tracks the interview phase, question number, topics covered, difficulty, important claims, strong areas, weak areas, uncertainties, and candidate-specific evidence.
+### Adaptive, Time-Boxed Interviewing
 
-### Evidence-Based Review
+The interviewer, Aria, runs a structured interview against the clock: introduction, resume deep-dive, technical depth, a hands-on canvas exercise, behavioral questions, and a wrap-up where the candidate can ask questions. Each session keeps compact interview state and evidence memory (claims, strong and weak areas, competencies), so follow-ups build on what the candidate actually said.
 
-The final report includes an overall score, strengths, improvements, competency scores, confidence, and supporting evidence. Candidate facts are grounded in the supplied resume and the interview transcript rather than invented by the model.
+### Hands-On Canvas
+
+Mid-interview, a role-specific exercise opens in a code/notes editor (a coding task for engineers, SQL for data roles, a written exercise for product or other roles). The candidate works while thinking out loud; the interviewer sees the live canvas and asks about their choices.
+
+### Evidence-Based Scorecard
+
+The final report is a scorecard: competencies rated on a 1-5 rubric, each with the reason ("why") and quotes from the interview, per-question feedback with a tip for next time, an evaluation of the hands-on exercise, and neutral session signals (leaving the tab, large pastes). Competencies the interview never assessed are left out rather than scored low.
 
 ## How We Are Different
 
@@ -78,7 +84,7 @@ Upload a resume or start without one. Add the target role and paste the job desc
 
 ### 2. Practice
 
-The browser opens a persistent WebSocket session. The candidate speaks, the system transcribes the utterance, and the AI interviewer responds with a concise question or follow-up.
+The candidate speaks (or types, or talks over Aria to interrupt). Answers are transcribed while the candidate is still pausing, and Aria responds sentence by sentence, with captions synchronized to her voice.
 
 ### 3. Review
 
@@ -86,158 +92,159 @@ End the session to generate a structured report. Review what was strong, what wa
 
 ## Technical Architecture
 
-The repository contains two applications:
+InterviewAI is a **single Next.js 16 application** deployed entirely on **Vercel's free Hobby plan** (functions pinned to Mumbai, `bom1`, next to the MongoDB Atlas cluster). The UI and the API (App Router route handlers) ship together: one deploy, one domain, no CORS, no separately hosted backend to cold-start.
 
-- `frontend`: Next.js 14 client with local Silero VAD, WebSocket audio transport, transcript UI, setup screens, and reports.
-- `backend`: FastAPI service coordinating transcription, NVIDIA language generation, Edge TTS, MongoDB persistence, adaptive state, and report generation.
+```
+Browser                                       Vercel Functions (Node.js, bom1)               Free providers
+───────                                       ───────────────────────────────               ──────────────
+Silero VAD (WASM) ─ pause ─► /transcribe ───► speculative STT ─────────────────────────────► Groq Whisper
+           └─ end of turn ─► /turn (text) ──► lock · prompt · stream ───────────────────────► NVIDIA Nemotron 3 Super
+                                              │   hedge after 800 ms ────────────────────────► Nemotron 3.5 Lightning
+Sequenced player ◄── text + MP3 (NDJSON) ──── │   sentence → warm TTS socket pool ───────────► Microsoft Edge neural TTS
+Captions / orb / canvas                       ▼   waitUntil: answer analysis, canvas task
+                                          MongoDB Atlas M0 (sessions, transcripts, evaluations, rate limits)
+```
 
-### Live Interview Pipeline
+### Why HTTP streaming instead of WebSockets
 
-1. Silero VAD runs locally in the browser and detects the end of a candidate utterance.
-2. The browser encodes the captured audio as 16 kHz mono PCM WAV.
-3. The audio is sent over the persistent interview WebSocket.
-4. Groq Whisper `whisper-large-v3-turbo` transcribes the completed utterance. Groq is used for speech-to-text only.
-5. The backend persists the candidate transcript and builds a bounded live prompt from the candidate, resume, job description, state, memory, and recent conversation.
-6. NVIDIA `nvidia/nemotron-3.5-lightning-30b-a3b` streams the interviewer response with live reasoning disabled.
-7. Each sentence is displayed immediately and sent to TTS concurrently.
-8. The browser queues audio using monotonic sequence numbers, so out-of-order TTS completion cannot reorder playback.
-9. Candidate answer analysis waits for an idle window and is canceled when a new utterance arrives, keeping analysis off the live response path.
+Serverless functions can't hold a 20-minute WebSocket open (Vercel's beta WebSockets close at the function's maximum duration, 300 s on Hobby). Each interview turn is therefore **one POST whose response streams newline-delimited JSON events** (`src/lib/protocol.ts`): `user_transcript`, `ai_sentence {seq}`, `audio {seq}` / `audio_error {seq}`, `canvas_task`, `metrics`, `error {code, retryable}`, `done {limit_reached}`. Turns are stateless, so refreshes, network changes, and different function instances all just work.
 
-### Provider Responsibilities
+### What makes it feel live (measured)
 
-- NVIDIA API Catalog: all language generation, adaptive interviewer responses, answer analysis, and reports.
-- Groq Whisper: speech-to-text only.
-- Microsoft Edge TTS: spoken playback.
-- MongoDB: sessions, transcripts, evaluations, interview state, and evidence memory.
+| Technique | Effect |
+|---|---|
+| Opening prefetched while the candidate is in the lobby | Greeting audible **~190 ms** after pressing Start |
+| **Speculative STT**: the browser mirrors the VAD state machine and transcribes after 350 ms of silence, inside the 800 ms end-of-turn window (only for utterances that pass the noise gate) | STT removed from the critical path |
+| Realtime model chosen by benchmark: Nemotron 3 Super, reasoning off (p50 ~250 ms, p90 ~300 ms to first token on a realistic prompt) | Fast *and* strongest replies |
+| **Hedged requests**: if no token after 800 ms, a second request races on a different model's queue | Free-tier queueing spikes (7-12 s seen) no longer stall the conversation |
+| **Warm Edge TTS socket pool**, opened at the start of each turn; reused across sentences; recycled before Edge's ~35 s idle cutoff; slow syntheses hedged on a fresh socket | ~400 ms handshake removed; warm sentence synthesis ~220-260 ms |
+| Short acknowledgements ("Got it.") spoken immediately while the rest of the reply is checked | First audio ~250-400 ms after the model's first token |
+| First clause spoken early; sentences synthesized concurrently, played strictly in order | Audio starts on the first clause |
+| Database round trips in parallel; per-turn writes collapsed into one | Low latency and ~44% more throughput on the free cluster |
 
-The live pipeline is optimized for fast perceived response, but it is not literally zero-latency. The current Whisper request begins after an utterance ends, and the first TTS sentence still needs to be synthesized. True full-duplex interaction would require a continuous streaming ASR/TTS transport.
+Measured end to end in a real Chromium browser (real VAD, NVIDIA, Edge TTS, MongoDB; STT simulated at 450 ms, and re-checked with real Groq Whisper at the same 1.7-1.8 s): **candidate stops talking → interviewer audible in 1.6-2.3 s (median 1.88 s)**, *including* the 800 ms silence window that decides the candidate has finished. Barge-in silences the interviewer **~0.4 s** after the candidate starts talking. Full methodology, every benchmark, load and quality results: **[docs/TESTING.md](docs/TESTING.md)**.
 
-## Local Setup
+### Interview quality guards
 
-### Backend
+- **One question per turn, enforced**: generation stops after the first sentence ending in a question mark (max 4 sentences).
+- **No repetition**: the opening of each reply is held back and compared with every earlier interviewer reply (anywhere in it, so a question re-asked after a different preamble counts) and with the candidate's last message; a repeat or parroting is regenerated (up to twice) before anything is spoken, and the last attempt sees only the candidate's latest message so there is nothing left to copy. Each later question is checked the same way before it is spoken. Held sentences are synthesized speculatively, so the check costs no latency.
+- **No early goodbyes**: wrap-up language or farewells ("take care", "have a great day") before the wrap-up section, and empty replies, are regenerated with the minutes remaining. Every sentence is checked before it is spoken: a later sentence that wraps up early or re-asks a question is dropped, and the model continues the reply with a new question.
+- **Clean endings**: an explicit "end the interview" closes it at once; the final turn never asks a question (a fixed closing line is spoken if the model asks one, says nothing, or fails); the end marker counts only from wrap-up on and never right after a question; a farewell without a question in wrap-up ends the interview even if the model forgets the marker.
+- **Deterministic edge cases**: "repeat the question" restates the exact question (and isn't scored); speaker echo (the interviewer's own words picked up by the mic) is discarded.
+- **Grounding**: source material is isolated in system sections; the dialogue is sent as real chat turns; every question asked so far is listed so none is re-asked; the canvas exercise stays hidden from the interviewer until it is on the candidate's screen; questions about the company are answered only from the job description; the interviewer never claims to run code.
+- **Report robustness**: model JSON is repaired (trailing commas, raw newlines, truncation) and validated against required keys, with one retry; the hands-on assessment may only name code that is literally in the canvas; hands-on scores are dropped when no exercise happened.
+
+### Report generation
+
+`GET /api/report/:id` generates the scorecard **at most once** (claimed in MongoDB; concurrent callers get `202` and poll) from the **full** transcript, the canvas work, analyst notes, and session signals, using Nemotron 3 Super with reasoning.
+
+### Provider responsibilities (all free tiers)
+
+| Provider | Used for | Key |
+|---|---|---|
+| NVIDIA API Catalog | Interviewer (Super), hedge/failover and per-answer notes (Lightning), canvas tasks and reports (Super with reasoning). Free tier ≈ 40 requests/minute **per model** (measured), so work is spread across models | `NVIDIA_API_KEY` |
+| Groq | Whisper speech-to-text; LLM fallback | `GROQ_API_KEY` |
+| Microsoft Edge TTS | Neural voice (`en-US-AriaNeural`) | none |
+| MongoDB Atlas M0 | Sessions, transcripts, evaluations, rate limits | `MONGODB_URI` |
+| Vercel Hobby | Hosting, CDN, serverless functions | — |
+
+## Project Structure
+
+```
+src/
+  app/                          Pages (landing, upload, setup, interview room, report) and API routes
+    api/health                  GET  readiness: database + provider configuration (never secrets)
+    api/resume/upload           POST PDF → text (unpdf, 4 MB max)
+    api/interview/start         POST create session with plan → { session_id }
+    api/interview/[id]          GET  session view + transcript (resume after refresh)
+    api/interview/[id]/turn     POST one streamed interview turn (audio/wav or JSON { text, voice })
+    api/interview/[id]/transcribe POST speculative STT during the candidate's pause
+    api/interview/[id]/canvas   PUT  autosave canvas work
+    api/interview/[id]/events   POST start event + integrity signals
+    api/interview/[id]/end      POST mark completed
+    api/report/[id]             GET  generate-once, cached scorecard
+  server/                       Server-only modules
+    turn.ts                     Turn orchestration: STT → guarded LLM stream → TTS → one-write persist
+    interview-plan.ts           Timed sections, per-turn guidance, repeat detection
+    interview-context.ts        Prompt/context/memory logic, JSON repair (pure, unit tested)
+    llm.ts                      SSE streaming, hedging, provider failover, sentence splitting
+    tts.ts / stt.ts             Edge TTS protocol + warm socket pool; Groq Whisper
+    sessions.ts                 Repository: lease lock, single-write turn finish, CAS analysis merge
+    analysis.ts / report.ts / canvas-task.ts   Background analysis, scorecard, exercise generation
+    rate-limit.ts               MongoDB fixed-window + in-memory limiters
+  hooks/                        useInterview (turn state machine, captions, barge-in, canvas), useVAD, useIntegrity
+  lib/                          Protocol, API client, sequenced audio player, utterance tracker, WAV
+tests/                          Unit (vitest), e2e/, live-browser/, quality/, load/, live/
+```
+
+## Deploy to Vercel (free)
+
+1. **MongoDB Atlas.** Create a free M0 cluster and a database user. Under **Network Access**, add `0.0.0.0/0` (Vercel uses dynamic IPs). Copy the connection string.
+2. **Keys.** Create a free [Groq key](https://console.groq.com/keys) (required for speech-to-text) and a free [NVIDIA API Catalog key](https://build.nvidia.com).
+3. **Import the repo in Vercel** (Add New → Project). Framework preset **Next.js**; **Root Directory must be the repository root** (`./`). If the project previously pointed at `frontend/`, change it under Settings → General.
+4. **Environment variables**: `MONGODB_URI`, `MONGODB_DB_NAME`, `GROQ_API_KEY`, `NVIDIA_API_KEY` (see `.env.example` for tuning). Remove the old `NEXT_PUBLIC_API_URL` / `NEXT_PUBLIC_WS_URL`.
+5. **Region.** `vercel.json` pins functions to `bom1` (Mumbai) because the Atlas cluster is in AWS `ap-south-1`; each database round trip is ~25 ms instead of ~200 ms from the default US region. If your cluster is elsewhere, change `regions` to the nearest Vercel region.
+6. **Deploy**, then open `https://<your-app>.vercel.app/api/health`; it should report `"status": "ok"`.
+
+Fluid compute (default for new projects) is required; routes declare `maxDuration` up to 120 s (Hobby limit 300 s). The Hobby plan is for personal, non-commercial use.
+
+## Local Development
 
 ```bash
-cd backend
-python -m venv venv
-source venv/bin/activate
-pip install -r requirements.txt
-cp .env.example .env
-uvicorn app.main:app --reload --port 8000
-```
-
-Configure `backend/.env`:
-
-```env
-MONGODB_URI="mongodb+srv://<user>:<password>@<cluster>/<database>"
-MONGODB_DB_NAME="interviewai"
-GROQ_API_KEY="your_groq_key"
-NVIDIA_API_KEY="your_nvidia_api_catalog_key"
-CORS_ORIGINS="http://localhost:3000"
-```
-
-Optional NVIDIA settings:
-
-```env
-NVIDIA_REALTIME_MODEL="nvidia/nemotron-3.5-lightning-30b-a3b"
-NVIDIA_ANALYSIS_MODEL="nvidia/nemotron-3-super-120b-a12b"
-NVIDIA_REALTIME_THINKING="false"
-NVIDIA_ANALYSIS_THINKING="true"
-NVIDIA_REALTIME_TIMEOUT="15"
-NVIDIA_ANALYSIS_TIMEOUT="45"
-```
-
-NVIDIA free endpoints and Groq free access are quota-limited development services. They are not unlimited production capacity. Review the current provider limits and terms before deployment.
-
-### Frontend
-
-```bash
-cd frontend
 npm install
-npm run dev
+cp .env.example .env.local   # fill in MONGODB_URI, GROQ_API_KEY, NVIDIA_API_KEY
+npm run dev                  # http://localhost:3000  (microphone requires localhost or HTTPS)
 ```
 
-The frontend defaults to:
+## Troubleshooting voice input
 
-- REST API: `http://127.0.0.1:8000`
-- WebSocket: `ws://127.0.0.1:8000`
+If speaking does nothing:
 
-For deployment, set:
-
-```env
-NEXT_PUBLIC_API_URL="https://your-backend.example.com"
-NEXT_PUBLIC_WS_URL="wss://your-backend.example.com"
-```
-
-## Routes
-
-- `/`: landing page and direct practice interview CTA.
-- `/upload`: optional PDF resume upload and extraction.
-- `/setup`: candidate name, target role, and optional job description.
-- `/interview/[id]`: live voice interview.
-- `/report/[id]`: evidence-based interview report.
-
-Backend endpoints:
-
-- `POST /api/resume/upload`
-- `POST /api/interview/start`
-- `GET /api/interview/{session_id}`
-- `GET /api/report/{session_id}`
-- `WS /ws/interview/{session_id}`
-
-## Latency And Reliability Guardrails
-
-The live path includes protections for common sources of lag and audio corruption:
-
-- Warm NVIDIA clients are reused instead of opening a new HTTP connection for every generation.
-- Live resume and job-description payloads are clipped, and only recent conversation is included.
-- Live generation streams with reasoning disabled.
-- TTS starts at the first sentence instead of waiting for the full answer.
-- TTS sentences run concurrently but are played back in sequence order.
-- Live turns are serialized so concurrent model responses cannot interleave.
-- Audio sequence numbers remain monotonic for the full WebSocket session.
-- TTS failures release their sequence so later audio cannot wait forever.
-- Background answer analysis is delayed and cancelable.
-- VAD does not upload new utterances while the interviewer is thinking or speaking.
-- Independent database reads are performed concurrently where they are on the live path.
-
-The first browser visit may spend time downloading local VAD/WebAssembly assets. That startup cost is not repeated for every answer.
+1. **Open `/api/health`.** `"stt": "invalid_key"` means the Groq key is wrong (create a new one at console.groq.com and set `GROQ_API_KEY`); the lobby already says voice answers are unavailable and the room uses typing.
+2. **Use "Check my microphone" in the lobby.** The level bar should move and say "We can hear you" when you talk; if you have several microphones (AirPods, a headset), pick the right one there.
+3. **Read the message under the transcript.** The room names the cause: microphone permission denied, blocked by the operating system (macOS: System Settings › Privacy & Security › Microphone), no microphone found, microphone busy (another app such as Zoom or Teams), or no sound from the microphone. Each has a "try again" or "restart microphone" button.
+4. **Background voices or noise?** If other people are talking near you, switch to push-to-talk ("Noisy room? Use push-to-talk" under the transcript, or the checkbox in the lobby) and hold Space while you answer.
+5. **Testing locally:** `npm run test:real-mic -- --stt=fake` speaks answers out loud through your speakers into your real microphone and reports what the app detects (see the script header for its modes).
 
 ## Verification
 
-Run the backend suite:
-
 ```bash
-cd backend
-./venv/bin/pytest -q
-python -m compileall -q app tests
+npm run check             # typecheck + lint + 161 unit tests
+npm run build             # production build (what Vercel runs)
+npm run test:e2e          # API e2e: production server + real MongoDB + real Edge TTS + simulated LLM/STT, timed sections at 60x
+npm run test:live-browser # LIVE: Chromium + fake mic + real VAD/NVIDIA/Edge TTS/MongoDB; latency, captions, barge-in, push-to-talk, canvas, report
+npm run test:real-mic     # LIVE, manual: your real microphone + speakers (macOS `say`); hands-free, push-to-talk, sensitivity, next dev
+npm run test:audio-capture # LIVE: 21 spoken answers (voices, speeds, quiet, noise, thinking pauses, 1-word, 2-minute) → audio coverage + real Whisper WER
+npm run test:quality      # LIVE: LLM-simulated candidates (5 personas) + deterministic checks + LLM judge on real NVIDIA
+node tests/load/run.mjs --users=50 --turns=8 --tts=off   # concurrency, tail latency, data integrity
+npm run test:live         # Edge TTS pool against the real service
 ```
 
-Run frontend checks:
+Latest results on this codebase (details, methodology and every metric in **[docs/TESTING.md](docs/TESTING.md)**):
 
-```bash
-cd frontend
-npx tsc --noEmit
-npm run lint
-npm run build
-```
+| Suite | Result |
+|---|---|
+| Unit | 161 / 161 |
+| API end-to-end | 29 / 29 |
+| Live browser (real Chromium, VAD, NVIDIA, Edge TTS, MongoDB) | 21 / 21 · voice turn 1.6-2.3 s end to end (median 1.88 s over 5 runs) · greeting 175-308 ms · barge-in 366-469 ms |
+| Real microphone (MacBook Air, Chromium and Brave) | voice works under `next dev` and production; real Groq transcripts word for word; 0 requests from background sound; 1 transcription per answer; invalid key → typing after 1 request |
+| Live browser with real Groq STT | conversation 14 / 14, canvas 7 / 7 · voice turn median 1.72-1.77 s |
+| Load | 30 concurrent candidates with real TTS: 210 turns, 0 errors, 420 clips, first audio p50 1.06 s · 50 concurrent: 450 turns, 0 errors, 11.5 turns/s |
+| Interview quality (LLM judge, 5 personas) | 4.78 / 5 mean on the final build (4.86 on the previous one); strong vs vague candidate reports 78 vs 28 |
+| Lint · typecheck · production audit | clean · clean · 0 vulnerabilities |
 
-The tests cover API routes, session persistence, structured context, provider selection, NVIDIA request construction, Whisper behavior, TTS behavior, sentence splitting, WebSocket orchestration, ordered audio sequencing, TTS failure recovery, and cancellation of background analysis.
+## Reliability, Security, and Privacy
 
-Live provider latency is environment-dependent and must be measured with valid provider keys, a running MongoDB instance, and the deployed network topology. Automated tests use provider mocks so they do not consume quotas or hide failures behind external services.
+- **No cold-start backend**; static pages from Vercel's CDN.
+- **Graceful degradation**: microphone errors explained with a way to retry, device changes followed automatically, a dead or silent microphone detected; an invalid speech-to-text key switches the room to typing; hedging and failover across two NVIDIA models and Groq; a live provider that hasn't started streaming within 6 s is abandoned, and a turn whose providers all failed quickly is retried once; STT retry; per-sentence browser speech when TTS fails; a stall guard in the player; typed answers without a microphone; retryable errors that never lose a saved answer; refresh-safe resume.
+- **Never speaks errors or internals**: provider failures become structured `error` events; control markers are stripped.
+- **Abuse protection**: per-IP limits on sessions, uploads, turns, reports, and transcriptions; per-session turn cap; 4 MB body limits; input length limits.
+- **Private links**: 128-bit random interview IDs; interview and report pages are `noindex`.
+- **Retention**: sessions, transcripts, and reports expire after 30 days (TTL); rate-limit keys store hashed IPs only.
+- **Headers**: `nosniff`, `X-Frame-Options: DENY`, HSTS, strict referrer policy, microphone limited to this origin.
+- **Dependencies**: Next.js 16.4 / React 19; `npm audit --omit=dev` reports 0 vulnerabilities.
 
-## Deployment And Security
-
-The frontend can be deployed to Vercel and the backend to Render or another ASGI host. The backend host must provide:
-
-- A Python 3.12-compatible runtime.
-- MongoDB network access.
-- NVIDIA and Groq environment variables.
-- WebSocket support.
-- CORS configured for the deployed frontend origin.
-
-Resume text, transcripts, and interview evidence are sent through the configured application and AI providers. Add authentication, authorization, encryption, retention controls, and a privacy policy before using sensitive candidate data in production.
-
-Never commit `.env` files or provider keys. Rotate any key exposed outside the intended secret store.
+For use with sensitive candidate data at scale, add authentication, a privacy policy, and review each provider's data terms.
 
 ## Product Boundaries
 
