@@ -2,9 +2,10 @@
 
 import Link from "next/link";
 import { useRouter } from "next/navigation";
-import { useState, type FormEvent } from "react";
+import { useEffect, useState, type FormEvent } from "react";
 import { ClientApiError, startInterview } from "@/lib/api";
 import { LIMITS } from "@/lib/protocol";
+import { prefetchVoiceAssets } from "@/lib/voice-assets";
 import { PROFILE_STORAGE_KEY, RESUME_STORAGE_KEY } from "@/lib/storage-keys";
 
 /** `name` is the file name; `candidateName` the person's name found on the resume. */
@@ -38,6 +39,9 @@ export default function SetupForm() {
   const [resume, setResume] = useState<StoredResume | null>(() => readStorage<StoredResume>("session", RESUME_STORAGE_KEY));
   const [isLoading, setIsLoading] = useState(false);
   const [error, setError] = useState<string | null>(null);
+
+  // The candidate spends a while on this form: fetch the voice runtime for the room meanwhile.
+  useEffect(() => prefetchVoiceAssets(), []);
 
   const handleStart = async (event: FormEvent) => {
     event.preventDefault();

@@ -8,6 +8,7 @@ import { ClientApiError, uploadResume } from "@/lib/api";
 import { cn } from "@/lib/cn";
 import { LIMITS } from "@/lib/protocol";
 import { RESUME_STORAGE_KEY } from "@/lib/storage-keys";
+import { prefetchVoiceAssets } from "@/lib/voice-assets";
 
 export default function UploadPage() {
   const router = useRouter();
@@ -17,6 +18,9 @@ export default function UploadPage() {
   const [error, setError] = useState<string | null>(null);
   // A resume already attached in this tab (e.g. after Back from setup). Read after mount to avoid a hydration mismatch.
   const [existing, setExisting] = useState<{ name?: string } | null>(null);
+
+  // The interview room needs the voice runtime; start fetching it while the candidate is here.
+  useEffect(() => prefetchVoiceAssets(), []);
 
   useEffect(() => {
     try {
