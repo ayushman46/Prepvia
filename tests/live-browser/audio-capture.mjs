@@ -580,6 +580,8 @@ try {
     };
     // Complete = every word reached the interviewer, in one turn, with no "please repeat".
     row.complete = row.coverage >= 0.98 && row.recall >= 0.9 && row.first_word && row.last_words && row.turns === 1 && !notices.some((n) => /repeat|didn't catch/i.test(n));
+    // The room's own voice-decision log (?debug=1): shows what the detector did, clip by clip.
+    row.decisions = await page.evaluate(() => (window.__vadEvents ?? []).slice(-60));
     rows.push(row);
     turnsInSession += Math.max(1, bubbles.length);
     console.log(

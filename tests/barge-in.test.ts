@@ -98,6 +98,27 @@ describe("EchoAwareBargeIn: gain learning", () => {
     expect(d.echoGain).toBeCloseTo(before, 6);
   });
 
+  it("does not learn the echo from a candidate who talks over Aria from the start of her reply", () => {
+    const d = new EchoAwareBargeIn();
+    // The candidate talks 20 dB louder than Aria's echo at the mic: far above the estimate.
+    for (let i = 0; i < 30; i++) d.observe(frame(i, 0.1, 0.1 * db(20), 0.9));
+    expect(d.echoGain).toBe(GAIN_INITIAL);
+  });
+
+  it("still learns a louder echo that persists, even when it is far above the start estimate", () => {
+    const d = new EchoAwareBargeIn();
+    for (let i = 0; i < 80; i++) d.observe(frame(i, 0.1, 0.1 * 3, 0.95));
+    expect(d.echoGain).toBeCloseTo(3, 1);
+  });
+
+  it("then still barges in on that candidate: 15 dB above a learned echo fires", () => {
+    const d = new EchoAwareBargeIn();
+    for (let i = 0; i < 60; i++) d.observe(frame(i, 0.1, 0.03));
+    let fired = false;
+    for (let i = 60; i < 80 && !fired; i++) fired = d.push(frame(i, 0.1, 0.03 * db(15), 0.9));
+    expect(fired).toBe(true);
+  });
+
   it("does not learn from silence", () => {
     const d = new EchoAwareBargeIn();
     for (let i = 0; i < 40; i++) d.observe(frame(i, 0, 0.2));

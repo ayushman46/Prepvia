@@ -35,8 +35,8 @@ export const GAIN_MIN = 0.05;
 export const GAIN_MAX = 4;
 /** Samples needed before the gain estimate replaces the initial value. */
 const GAIN_MIN_SAMPLES = 5;
-/** After this many samples, a sample more than ECHO_MARGIN_DB above the estimate is candidate speech, not echo. */
-const GAIN_WARMUP = 20;
+/** This many consecutive too-loud samples mean the echo itself is louder than the estimate. */
+const GAIN_RELEARN_FRAMES = 40;
 /** Playback RMS below this is silence. */
 export const OUTPUT_FLOOR = 0.004;
 
@@ -73,6 +73,8 @@ export class EchoAwareBargeIn {
   /** Echo-gain samples: mic RMS divided by the echo reference, on playback frames. */
   private samples: number[] = [];
   private gain = GAIN_INITIAL;
+  /** Consecutive samples rejected as candidate speech (see learn). */
+  private rejectedRun = 0;
   /** Most recent frame with audible playback, and the level it had. */
   private lastAudibleAt = -Infinity;
   private lastAudibleRms = 0;
@@ -169,7 +171,18 @@ export class EchoAwareBargeIn {
     const rms = finiteOr(frame.rms, 0);
     if (reference <= 0 || rms <= 0) return;
     const sample = Math.min(GAIN_MAX, rms / reference);
-    if (this.samples.length >= GAIN_WARMUP && sample > this.gain * fromDb(ECHO_MARGIN_DB)) return;
+    // A sample far above the current estimate is the candidate talking over Aria, not echo:
+    // rejected from the first frame. A sustained run of them means the echo itself is
+    // louder than the estimate, so it is learned after all.
+    if (sample > this.gain * fromDb(ECHO_MARGIN_DB)) {
+      if (this.rejectedRun < GAIN_RELEARN_FRAMES) {
+        this.rejectedRun += 1;
+        return;
+      }
+      // Sustained: keep accepting until a normal-level sample resets the run.
+    } else {
+      this.rejectedRun = 0;
+    }
     this.samples.push(sample);
     if (this.samples.length > GAIN_SAMPLES) this.samples.shift();
     if (this.samples.length >= GAIN_MIN_SAMPLES) {
